@@ -1194,6 +1194,24 @@
 
         // Username management
         function promptUsername() {
+            // Check URL parameters first
+            const urlParams = new URLSearchParams(window.location.search);
+            const urlUsername = urlParams.get('user');
+
+            if (urlUsername) {
+                // Use username from URL
+                currentUsername = urlUsername;
+                localStorage.setItem('consensusUsername', urlUsername);
+                initClassData();
+                showUsernameWelcome();
+                loadEmbeddedCurriculum();
+
+                // Clean up URL (optional - removes the parameter from address bar)
+                window.history.replaceState({}, document.title, window.location.pathname);
+                return;
+            }
+
+            // Rest of existing promptUsername code...
             const savedUsername = localStorage.getItem('consensusUsername');
             if (savedUsername) {
                 currentUsername = savedUsername;
@@ -5619,8 +5637,14 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 // Generate QR if not already done
                 const qrElement = document.getElementById('site-qr');
                 if (qrElement && !qrElement.hasChildNodes()) {
+                    // Include username in URL
+                    const baseUrl = 'https://robjohncolson.github.io/test_curriculum_render/';
+                    const urlWithUser = currentUsername ?
+                        `${baseUrl}?user=${encodeURIComponent(currentUsername)}` :
+                        baseUrl;
+
                     new QRCode(qrElement, {
-                        text: 'https://robjohncolson.github.io/test_curriculum_render/',
+                        text: urlWithUser,
                         width: 200,
                         height: 200,
                         correctLevel: QRCode.CorrectLevel.L
