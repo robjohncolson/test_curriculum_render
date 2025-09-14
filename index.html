@@ -4288,13 +4288,14 @@ if (chartInstances[`dotplot-${questionId}`]) {
             reader.readAsText(file);
         }
 
+        // Simplified sync menu with role-based options
         function renderSyncButtons() {
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            const isDesktop = !isMobile;
+
             return `
-                <button onclick="quickExport()" class="sync-button" style="background: #4CAF50;">
-                    💾 Save My Work
-                </button>
-                <button onclick="openShareMenu()" class="sync-button" style="background: #2196F3;">
-                    🔄 Share with Class
+                <button onclick="openSimpleSyncMenu()" class="sync-button" style="background: #2196F3;">
+                    🔄 Sync & Save
                 </button>
             `;
         }
@@ -4304,32 +4305,75 @@ if (chartInstances[`dotplot-${questionId}`]) {
             showMessage('Your answers have been saved!', 'success');
         }
 
-        window.openShareMenu = function() {
+        window.openSimpleSyncMenu = function() {
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
             const modal = document.createElement('div');
             modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 2000; display: flex; align-items: center; justify-content: center;';
             modal.onclick = function(e) { if(e.target === modal) modal.remove(); };
 
-            modal.innerHTML = `
-                <div style="background: white; padding: 30px; border-radius: 10px; max-width: 350px; width: 90%; text-align: center;">
-                    <h2 style="margin-top: 0;">How do you want to share?</h2>
+            let menuContent = '';
+
+            if (isMobile) {
+                // Phone menu - can scan and enter codes
+                menuContent = `
+                    <h2 style="margin-top: 0; text-align: center;">📱 Phone Menu</h2>
+
+                    <button onclick="enterTransferCode(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #4CAF50;">
+                        📥 Get from Desktop
+                        <div style="font-size: 12px; opacity: 0.8;">Enter a 6-character code</div>
+                    </button>
 
                     <button onclick="startSmartSync(); this.closest('[style*=fixed]').remove();"
-                            class="sync-button" style="width: 100%; margin-bottom: 15px; background: #4CAF50; padding: 15px;">
-                        📱 With Another Phone
-                        <div style="font-size: 12px; opacity: 0.8; margin-top: 5px;">Use QR codes</div>
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #9C27B0;">
+                        📷 Scan Another Phone
+                        <div style="font-size: 12px; opacity: 0.8;">Use camera to scan QR</div>
                     </button>
 
-                    <button onclick="document.getElementById('import-input').click(); this.closest('[style*=fixed]').remove();"
-                            class="sync-button" style="width: 100%; margin-bottom: 15px; padding: 15px;">
-                        📁 From a File
-                        <div style="font-size: 12px; opacity: 0.8; margin-top: 5px;">Load saved data</div>
+                    <button onclick="showMyQR(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px;">
+                        📤 Share My Answers
+                        <div style="font-size: 12px; opacity: 0.8;">Show QR to another phone</div>
+                    </button>
+                `;
+            } else {
+                // Desktop menu - no camera required
+                menuContent = `
+                    <h2 style="margin-top: 0; text-align: center;">💻 Desktop Menu</h2>
+
+                    <button onclick="shareViaCode(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #4CAF50;">
+                        📤 Send to Phone
+                        <div style="font-size: 12px; opacity: 0.8;">Get a code to enter on phone</div>
                     </button>
 
-                    <input type="file" id="import-input" accept=".json" style="display:none;"
-                           onchange="importClassData(event);">
+                    <button onclick="quickExport(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px;">
+                        💾 Save to File
+                        <div style="font-size: 12px; opacity: 0.8;">Download your answers</div>
+                    </button>
+                `;
+            }
+
+            // Both get file import option
+            menuContent += `
+                <input type="file" id="import-input" accept=".json" style="display:none;"
+                       onchange="importClassData(event); this.closest('[style*=fixed]').remove();">
+                <button onclick="document.getElementById('import-input').click();"
+                        class="sync-button" style="width: 100%; margin-bottom: 20px;">
+                    📁 Load from File
+                    <div style="font-size: 12px; opacity: 0.8;">Import saved data</div>
+                </button>
+            `;
+
+            modal.innerHTML = `
+                <div style="background: white; padding: 30px; border-radius: 10px; max-width: 350px; width: 90%;">
+                    ${menuContent}
 
                     <button onclick="this.closest('[style*=fixed]').remove()"
-                            style="width: 100%; padding: 10px; background: none; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;">
+                            style="width: 100%; padding: 10px; background: none;
+                                   border: 1px solid #ccc; border-radius: 4px; cursor: pointer;">
                         Cancel
                     </button>
                 </div>
@@ -6308,6 +6352,207 @@ if (chartInstances[`dotplot-${questionId}`]) {
         // Add button to start smart sync
         window.startSmartSync = function() {
             smartSync.initiate();
+        }
+
+        // Text Code Transfer System (No Camera Required on Desktop)
+        class TextCodeTransfer {
+            constructor() {
+                this.activeCode = null;
+                this.codeData = {};
+            }
+
+            // Desktop: Generate a 6-character code
+            generateTransferCode() {
+                // Create a simple 6-character code
+                const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+                // Store the data associated with this code
+                this.codeData[code] = {
+                    username: currentUsername,
+                    data: classData.users[currentUsername],
+                    timestamp: Date.now(),
+                    expires: Date.now() + (10 * 60 * 1000) // 10 minute expiry
+                };
+
+                this.activeCode = code;
+                this.showCodeDisplay();
+
+                // Clean up old codes
+                this.cleanupExpiredCodes();
+
+                return code;
+            }
+
+            showCodeDisplay() {
+                const modal = document.createElement('div');
+                modal.id = 'code-display';
+                modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 2000; display: flex; align-items: center; justify-content: center;';
+                modal.onclick = function(e) { if(e.target === modal) modal.remove(); };
+
+                modal.innerHTML = `
+                    <div style="background: white; padding: 30px; border-radius: 10px; max-width: 400px; text-align: center;">
+                        <h2>📤 Share Your Answers</h2>
+                        <p>On your phone, enter this code:</p>
+
+                        <div style="font-size: 48px; font-weight: bold; letter-spacing: 8px;
+                                    background: #f0f0f0; padding: 20px; border-radius: 8px;
+                                    margin: 20px 0; font-family: monospace;">
+                            ${this.activeCode}
+                        </div>
+
+                        <div style="color: #666; font-size: 14px; margin-bottom: 20px;">
+                            This code expires in 10 minutes
+                        </div>
+
+                        <button onclick="copyCodeToClipboard('${this.activeCode}')"
+                                class="submit-button" style="margin-bottom: 10px;">
+                            📋 Copy Code
+                        </button>
+
+                        <button onclick="this.closest('[style*=fixed]').remove()"
+                                class="submit-button" style="background: #666;">
+                            Done
+                        </button>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+            }
+
+            cleanupExpiredCodes() {
+                const now = Date.now();
+                for (let code in this.codeData) {
+                    if (this.codeData[code].expires < now) {
+                        delete this.codeData[code];
+                    }
+                }
+            }
+        }
+
+        // Phone side - enter code and receive data
+        window.enterTransferCode = function() {
+            const modal = document.createElement('div');
+            modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 2000; display: flex; align-items: center; justify-content: center;';
+            modal.onclick = function(e) { if(e.target === modal) modal.remove(); };
+
+            modal.innerHTML = `
+                <div style="background: white; padding: 30px; border-radius: 10px; max-width: 350px; width: 90%;">
+                    <h2 style="text-align: center;">📥 Get Answers from Desktop</h2>
+                    <p style="text-align: center;">Enter the 6-character code shown on the desktop:</p>
+
+                    <input type="text"
+                           id="transfer-code-input"
+                           placeholder="ABC123"
+                           maxlength="6"
+                           style="width: 100%; padding: 15px; font-size: 24px; text-align: center;
+                                  font-family: monospace; text-transform: uppercase;
+                                  border: 2px solid #ddd; border-radius: 4px; margin: 20px 0;">
+
+                    <div id="code-error" style="color: red; text-align: center; margin-bottom: 10px; display: none;">
+                        Invalid or expired code
+                    </div>
+
+                    <button onclick="submitTransferCode()"
+                            class="submit-button" style="width: 100%; margin-bottom: 10px;">
+                        Get Data
+                    </button>
+
+                    <button onclick="this.closest('[style*=fixed]').remove()"
+                            style="width: 100%; padding: 10px; background: none;
+                                   border: 1px solid #ccc; border-radius: 4px; cursor: pointer;">
+                        Cancel
+                    </button>
+                </div>
+            `;
+
+            document.body.appendChild(modal);
+
+            // Auto-focus the input
+            setTimeout(() => {
+                document.getElementById('transfer-code-input').focus();
+            }, 100);
+        }
+
+        window.submitTransferCode = function() {
+            const input = document.getElementById('transfer-code-input');
+            const code = input.value.toUpperCase();
+
+            if (code.length !== 6) {
+                document.getElementById('code-error').style.display = 'block';
+                document.getElementById('code-error').textContent = 'Code must be 6 characters';
+                return;
+            }
+
+            // Here you'd normally fetch from a server, but for local testing,
+            // we'll use a workaround with localStorage as a shared medium
+            const sharedData = localStorage.getItem(`transfer_${code}`);
+
+            if (!sharedData) {
+                document.getElementById('code-error').style.display = 'block';
+                document.getElementById('code-error').textContent = 'Invalid or expired code';
+                return;
+            }
+
+            try {
+                const data = JSON.parse(sharedData);
+
+                // Import the data
+                const imported = {
+                    users: {
+                        [data.username]: data.data
+                    }
+                };
+                mergeClassData(imported);
+
+                // Clean up
+                localStorage.removeItem(`transfer_${code}`);
+
+                // Success message
+                document.querySelector('[style*=fixed]').innerHTML = `
+                    <div style="background: white; padding: 30px; border-radius: 10px; text-align: center;">
+                        <h2>✅ Success!</h2>
+                        <p>Imported answers from ${data.username}</p>
+                        <button onclick="this.closest('[style*=fixed]').remove(); loadProgress();"
+                                class="submit-button" style="margin-top: 20px;">
+                            Done
+                        </button>
+                    </div>
+                `;
+
+            } catch(e) {
+                document.getElementById('code-error').style.display = 'block';
+                document.getElementById('code-error').textContent = 'Error processing data';
+            }
+        }
+
+        // Helper function to copy code
+        window.copyCodeToClipboard = function(code) {
+            navigator.clipboard.writeText(code).then(() => {
+                showMessage('Code copied to clipboard!', 'success');
+            });
+        }
+
+        // Initialize
+        const textTransfer = new TextCodeTransfer();
+
+        // Desktop generates code and stores in localStorage (for local testing)
+        window.shareViaCode = function() {
+            const code = textTransfer.generateTransferCode();
+
+            // For local testing, store in localStorage
+            // In production, this would go to a server
+            const dataPacket = {
+                username: currentUsername,
+                data: classData.users[currentUsername],
+                timestamp: Date.now()
+            };
+
+            localStorage.setItem(`transfer_${code}`, JSON.stringify(dataPacket));
+
+            // Auto-remove after 10 minutes
+            setTimeout(() => {
+                localStorage.removeItem(`transfer_${code}`);
+            }, 10 * 60 * 1000);
         }
     </script>
 </body>
