@@ -4288,45 +4288,54 @@ if (chartInstances[`dotplot-${questionId}`]) {
             reader.readAsText(file);
         }
 
-        // Render sync buttons based on device type
         function renderSyncButtons() {
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-
-            let buttons = `
-                <button onclick="exportPersonal()" class="sync-button">Export My Data</button>
-            `;
-
-            // Smart Sync button - always available
-            buttons += `
-                <button onclick="startSmartSync()" class="sync-button" style="background: #4CAF50;">
-                    🔄 Smart Sync
+            return `
+                <button onclick="quickExport()" class="sync-button" style="background: #4CAF50;">
+                    💾 Save My Work
+                </button>
+                <button onclick="openShareMenu()" class="sync-button" style="background: #2196F3;">
+                    🔄 Share with Class
                 </button>
             `;
+        }
 
-            // Chunked transfer buttons
-            buttons += `
-                <button onclick="showChunkedSend()" class="sync-button" style="background: #009688;">
-                    📤 Send Data (Parts)
-                </button>
-                <button onclick="showChunkedReceive()" class="sync-button" style="background: #00BCD4;">
-                    📥 Receive Data (Parts)
-                </button>
-            `;
+        window.quickExport = function() {
+            exportPersonal();
+            showMessage('Your answers have been saved!', 'success');
+        }
 
-            if (isMobile) {
-                buttons += `
-                    <button onclick="startMasterSync()" class="sync-button" style="background: #9C27B0;">
-                        👑 Master Sync
+        window.openShareMenu = function() {
+            const modal = document.createElement('div');
+            modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 2000; display: flex; align-items: center; justify-content: center;';
+            modal.onclick = function(e) { if(e.target === modal) modal.remove(); };
+
+            modal.innerHTML = `
+                <div style="background: white; padding: 30px; border-radius: 10px; max-width: 350px; width: 90%; text-align: center;">
+                    <h2 style="margin-top: 0;">How do you want to share?</h2>
+
+                    <button onclick="startSmartSync(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 15px; background: #4CAF50; padding: 15px;">
+                        📱 With Another Phone
+                        <div style="font-size: 12px; opacity: 0.8; margin-top: 5px;">Use QR codes</div>
                     </button>
-                `;
-            }
 
-            buttons += `
-                <input type="file" id="import-input" accept=".json" style="display:none;" onchange="importClassData(event)">
-                <button class="sync-button" onclick="document.getElementById('import-input').click()">Import File</button>
+                    <button onclick="document.getElementById('import-input').click(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 15px; padding: 15px;">
+                        📁 From a File
+                        <div style="font-size: 12px; opacity: 0.8; margin-top: 5px;">Load saved data</div>
+                    </button>
+
+                    <input type="file" id="import-input" accept=".json" style="display:none;"
+                           onchange="importClassData(event);">
+
+                    <button onclick="this.closest('[style*=fixed]').remove()"
+                            style="width: 100%; padding: 10px; background: none; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;">
+                        Cancel
+                    </button>
+                </div>
             `;
 
-            return buttons;
+            document.body.appendChild(modal);
         }
 
         // Merge imported data with existing data
