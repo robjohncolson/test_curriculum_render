@@ -4296,25 +4296,27 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 <button onclick="exportPersonal()" class="sync-button">Export My Data</button>
             `;
 
+            // Chunked transfer buttons
+            buttons += `
+                <button onclick="showChunkedSend()" class="sync-button" style="background: #009688;">
+                    📤 Send Data (Parts)
+                </button>
+                <button onclick="showChunkedReceive()" class="sync-button" style="background: #00BCD4;">
+                    📥 Receive Data (Parts)
+                </button>
+            `;
+
             if (isMobile) {
-                // On mobile, show Master Sync option
                 buttons += `
                     <button onclick="startMasterSync()" class="sync-button" style="background: #9C27B0;">
                         👑 Master Sync
-                    </button>
-                `;
-            } else {
-                // On desktop, show QR display option
-                buttons += `
-                    <button onclick="showMyQR()" class="sync-button">
-                        📱 Show My QR
                     </button>
                 `;
             }
 
             buttons += `
                 <input type="file" id="import-input" accept=".json" style="display:none;" onchange="importClassData(event)">
-                <button class="sync-button" onclick="document.getElementById('import-input').click()">Import Class Data</button>
+                <button class="sync-button" onclick="document.getElementById('import-input').click()">Import File</button>
             `;
 
             return buttons;
@@ -4980,6 +4982,280 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
         }
 
+        // Chunked QR Code Transfer System
+        class ChunkedQRTransfer {
+            constructor() {
+                this.chunks = [];
+                this.currentChunk = 0;
+                this.scannedChunks = {};
+                this.expectedChunks = 0;
+            }
+
+            // Sender side - create chunks
+            prepareChunks() {
+                const MAX_CHUNK_SIZE = 500; // Much smaller for better scanning
+
+                // Get all user data
+                const fullData = {
+                    username: currentUsername,
+                    answers: classData.users[currentUsername].answers,
+                    reasons: classData.users[currentUsername].reasons,
+                    timestamps: classData.users[currentUsername].timestamps
+                };
+
+                const jsonStr = JSON.stringify(fullData);
+                const encoded = btoa(jsonStr);
+
+                // Split into chunks
+                this.chunks = [];
+                for (let i = 0; i < encoded.length; i += MAX_CHUNK_SIZE) {
+                    this.chunks.push(encoded.substr(i, MAX_CHUNK_SIZE));
+                }
+
+                return this.chunks.length;
+            }
+
+            // Show chunked QR interface
+            showChunkedTransfer() {
+                const totalChunks = this.prepareChunks();
+
+                const modal = document.createElement('div');
+                modal.id = 'chunked-transfer';
+                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 3000; padding: 20px;';
+                modal.innerHTML = `
+                    <div style="max-width: 500px; margin: 0 auto; text-align: center;">
+                        <h2>📦 Data Transfer (${totalChunks} parts)</h2>
+                        <p>Have the other device scan each QR code in order</p>
+
+                        <div style="margin: 20px 0;">
+                            <h3>Part <span id="chunk-num">1</span> of ${totalChunks}</h3>
+                            <div id="chunk-qr" style="margin: 20px auto;"></div>
+                        </div>
+
+                        <div style="display: flex; gap: 10px; justify-content: center;">
+                            <button onclick="chunkedTransfer.prevChunk()" id="prev-btn" class="submit-button" disabled>
+                                ← Previous
+                            </button>
+                            <button onclick="chunkedTransfer.nextChunk()" id="next-btn" class="submit-button">
+                                Next →
+                            </button>
+                            <button onclick="chunkedTransfer.cancel()" class="submit-button" style="background: #f44336;">
+                                Cancel
+                            </button>
+                        </div>
+
+                        <div style="margin-top: 20px; padding: 10px; background: #f0f0f0; border-radius: 5px;">
+                            <small>Tip: Wait for "Success!" on receiver before moving to next</small>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                this.showCurrentChunk();
+            }
+
+            showCurrentChunk() {
+                const qrDiv = document.getElementById('chunk-qr');
+                qrDiv.innerHTML = ''; // Clear previous
+
+                const chunkData = {
+                    type: 'chunk',
+                    chunk: this.currentChunk,
+                    total: this.chunks.length,
+                    data: this.chunks[this.currentChunk],
+                    username: currentUsername
+                };
+
+                new QRCode(qrDiv, {
+                    text: JSON.stringify(chunkData),
+                    width: 256,
+                    height: 256,
+                    correctLevel: QRCode.CorrectLevel.L
+                });
+
+                document.getElementById('chunk-num').textContent = this.currentChunk + 1;
+                document.getElementById('prev-btn').disabled = this.currentChunk === 0;
+                document.getElementById('next-btn').disabled = this.currentChunk === this.chunks.length - 1;
+            }
+
+            nextChunk() {
+                if (this.currentChunk < this.chunks.length - 1) {
+                    this.currentChunk++;
+                    this.showCurrentChunk();
+                }
+            }
+
+            prevChunk() {
+                if (this.currentChunk > 0) {
+                    this.currentChunk--;
+                    this.showCurrentChunk();
+                }
+            }
+
+            cancel() {
+                document.getElementById('chunked-transfer')?.remove();
+            }
+
+            // Receiver side
+            startChunkedReceive() {
+                const modal = document.createElement('div');
+                modal.id = 'chunked-receive';
+                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 3000; padding: 20px;';
+                modal.innerHTML = `
+                    <div style="max-width: 500px; margin: 0 auto;">
+                        <h2>📥 Receive Data in Parts</h2>
+                        <p>Scan each QR code shown on the sender's device</p>
+
+                        <div id="chunk-scanner" style="width: 100%; height: 300px;"></div>
+
+                        <div style="margin: 20px 0; padding: 15px; background: #f0f0f0; border-radius: 5px;">
+                            <h3>Progress</h3>
+                            <div id="chunk-progress">Waiting for first part...</div>
+                            <div id="chunks-received" style="margin-top: 10px;"></div>
+                        </div>
+
+                        <button onclick="chunkedTransfer.cancelReceive()" class="submit-button" style="background: #f44336;">
+                            Cancel
+                        </button>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                this.startChunkScanner();
+            }
+
+            startChunkScanner() {
+                const html5QrCode = new Html5Qrcode("chunk-scanner");
+
+                const config = {
+                    fps: 10,
+                    qrbox: { width: 250, height: 250 }
+                };
+
+                const onScanSuccess = (decodedText) => {
+                    this.handleScannedChunk(decodedText, html5QrCode);
+                };
+
+                // Try to start camera
+                html5QrCode.start(
+                    { facingMode: "environment" },
+                    config,
+                    onScanSuccess
+                ).catch(err => {
+                    document.getElementById('chunk-progress').innerHTML =
+                        '❌ Camera error. Please allow camera access and reload.';
+                });
+
+                this.currentScanner = html5QrCode;
+            }
+
+            handleScannedChunk(decodedText, scanner) {
+                try {
+                    const chunk = JSON.parse(decodedText);
+                    if (chunk.type === 'chunk') {
+                        this.processChunk(chunk, scanner);
+                    }
+                } catch(e) {
+                    console.error('Invalid chunk:', e);
+                }
+            }
+
+            processChunk(chunk, scanner) {
+                // Store the chunk
+                this.scannedChunks[chunk.chunk] = chunk.data;
+                this.expectedChunks = chunk.total;
+
+                // Update progress
+                const received = Object.keys(this.scannedChunks).length;
+                document.getElementById('chunk-progress').innerHTML =
+                    `Received ${received} of ${chunk.total} parts`;
+
+                // Show which chunks we have
+                let progressHTML = '';
+                for (let i = 0; i < chunk.total; i++) {
+                    if (this.scannedChunks[i] !== undefined) {
+                        progressHTML += `✅ Part ${i + 1} `;
+                    } else {
+                        progressHTML += `⬜ Part ${i + 1} `;
+                    }
+                }
+                document.getElementById('chunks-received').innerHTML = progressHTML;
+
+                // Check if complete
+                if (received === chunk.total) {
+                    scanner.stop();
+                    this.assembleAndImport(chunk.username);
+                }
+            }
+
+            assembleAndImport(username) {
+                try {
+                    // Reassemble in order
+                    let fullData = '';
+                    for (let i = 0; i < this.expectedChunks; i++) {
+                        fullData += this.scannedChunks[i];
+                    }
+
+                    // Decode and import
+                    const decoded = JSON.parse(atob(fullData));
+                    const imported = {
+                        users: {
+                            [username]: {
+                                answers: decoded.answers,
+                                reasons: decoded.reasons,
+                                timestamps: decoded.timestamps,
+                                attempts: decoded.attempts || {}
+                            }
+                        }
+                    };
+
+                    mergeClassData(imported);
+
+                    // Success!
+                    document.getElementById('chunk-progress').innerHTML =
+                        `✅ Success! Imported data from ${username}`;
+
+                    setTimeout(() => {
+                        this.cancelReceive();
+                        loadProgress();
+                    }, 2000);
+
+                } catch(e) {
+                    console.error('Error assembling chunks:', e);
+                    document.getElementById('chunk-progress').innerHTML =
+                        '❌ Error assembling data. Please try again.';
+                }
+            }
+
+            cancelReceive() {
+                // Stop any running camera
+                try {
+                    if (this.currentScanner) {
+                        this.currentScanner.stop();
+                    }
+                } catch(e) {
+                    console.error('Error stopping scanner:', e);
+                }
+
+                const modal = document.getElementById('chunked-receive');
+                if (modal) modal.remove();
+                this.scannedChunks = {};
+                this.currentScanner = null;
+            }
+        }
+
+        // Initialize chunked transfer
+        const chunkedTransfer = new ChunkedQRTransfer();
+
+        // Add buttons to sync controls
+        window.showChunkedSend = function() {
+            chunkedTransfer.showChunkedTransfer();
+        }
+
+        window.showChunkedReceive = function() {
+            chunkedTransfer.startChunkedReceive();
+        }
+
         // Add this diagnostic function to see what's happening:
         window.debugLoadCurriculum = async function() {
             const fileInput = document.getElementById('fileInput');
@@ -5593,31 +5869,29 @@ if (chartInstances[`dotplot-${questionId}`]) {
         }
 
         window.finishMasterSync = function() {
-            if (window.currentScanner) {
-                window.currentScanner.stop();
+    if (window.currentScanner) {
+        window.currentScanner.stop();
+    }
+
+    // Merge all scanned data
+    window.scannedStudents.forEach(studentData => {
+        const imported = {
+            users: {
+                [studentData.username]: studentData.changes || studentData.data
             }
+        };
+        mergeClassData(imported);
+    });
 
-            // Merge all scanned data
-            window.scannedStudents.forEach(studentData => {
-                const imported = {
-                    users: {
-                        [studentData.username]: studentData.changes || studentData.data
-                    }
-                };
-                mergeClassData(imported);
-            });
+    // Just save to local storage, don't export
+    saveClassData();
 
-            // Export merged database
-            const blob = new Blob([JSON.stringify(classData, null, 2)], {type: 'application/json'});
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `merged_class_data_${Date.now()}.json`;
-            a.click();
+    document.querySelector('[style*="position: fixed"]').remove();
+    showMessage(`Merged ${window.scannedStudents.length} students' data!`, 'success');
 
-            document.querySelector('[style*="position: fixed"]').remove();
-            showMessage(`Merged ${window.scannedStudents.length} students' data!`, 'success');
-        }
+    // Refresh the current view to show new data
+    loadProgress();
+}
 
         window.cancelMasterSync = function() {
             if (window.currentScanner) {
