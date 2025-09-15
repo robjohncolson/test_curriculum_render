@@ -6967,6 +6967,19 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     { start: 4000, end: 8000, name: 'high' },
                     { start: 8000, end: 15000, name: 'ultrasonic' }
                 ];
+
+                // Speed profiles for adaptive transmission
+                this.speedProfiles = {
+                    'ultra-slow': { toneDuration: 200, interToneDelay: 100, name: 'Ultra Slow' },
+                    'slow': { toneDuration: 100, interToneDelay: 50, name: 'Slow' },
+                    'medium': { toneDuration: 50, interToneDelay: 25, name: 'Medium' },
+                    'fast': { toneDuration: 20, interToneDelay: 10, name: 'Fast' },
+                    'ultra-fast': { toneDuration: 10, interToneDelay: 5, name: 'Ultra Fast' }
+                };
+
+                this.currentSpeed = 'ultra-slow'; // Start with slowest
+                this.speedTestResults = {};
+                this.negotiatedSpeed = null;
             }
 
             init() {
@@ -7006,20 +7019,29 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 if (!this.audioContext) this.init();
 
                 this.role = 'sender';
-                this.state = 'ready_to_send';
+                this.state = 'negotiating';
 
                 this.showSenderUI();
 
-                // Send a clear "I am sender" beacon
-                await this.playTone(this.tones.HELLO, 200);
-                await this.delay(100);
-                await this.playTone(this.tones.READY, 200);
+                // Start listening for ACKs
+                await this.startListening();
 
-                // Wait a moment then start sending data
-                setTimeout(async () => {
-                    this.updateStatus('📤 Transmitting data...');
-                    await this.transmitDataReliable();
-                }, 1000);
+                // Negotiate speed with receiver
+                await this.delay(1000); // Give receiver time to start
+
+                const negotiatedSpeed = await this.negotiateSpeed();
+
+                if (!negotiatedSpeed) {
+                    this.updateStatus('❌ Could not establish connection');
+                    setTimeout(() => this.cancel(), 3000);
+                    return;
+                }
+
+                // Now send data at negotiated speed
+                this.updateStatus(`📤 Sending data at ${this.speedProfiles[negotiatedSpeed].name} speed...`);
+                await this.delay(500);
+
+                await this.transmitDataReliable();
             }
 
             async startAsReceiver() {
@@ -7438,6 +7460,59 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
             async handleTone(tone) {
                 if (this.role !== 'receiver') return;
+
+                // Detect speed test marker
+                if (Math.abs(tone.freq - 2500) < 100) {
+                    this.state = 'speed_test';
+                    this.testBuffer = '';
+                    this.testStartTime = Date.now();
+                    console.log('Speed test detected');
+                    return;
+                }
+
+                // Handle speed test
+                if (this.state === 'speed_test') {
+                    if (tone.freq >= 2900 && tone.freq <= 4600) {
+                        const hexVal = Math.round((tone.freq - 3000) / 100);
+                        if (hexVal >= 0 && hexVal <= 15) {
+                            this.testBuffer += hexVal.toString(16);
+
+                            // Check if we got "TEST_" pattern
+                            if (this.testBuffer.length >= 10) {
+                                try {
+                                    const decoded = this.hexToString(this.testBuffer);
+                                    if (decoded.startsWith('TEST_')) {
+                                        // Success! Send ACK
+                                        console.log('Speed test passed:', decoded);
+                                        this.pauseListening();
+                                        await this.playTone(this.tones.ACK, 100);
+                                        this.resumeListening();
+
+                                        this.state = 'waiting_for_sender';
+                                        this.updateStatus('✅ Speed test passed');
+                                    }
+                                } catch(e) {
+                                    // Failed to decode, send ERROR
+                                    this.pauseListening();
+                                    await this.playTone(this.tones.ERROR, 100);
+                                    this.resumeListening();
+
+                                    this.state = 'waiting_for_sender';
+                                }
+
+                                this.testBuffer = '';
+                            }
+                        }
+                    }
+
+                    // Timeout speed test after 3 seconds
+                    if (Date.now() - this.testStartTime > 3000) {
+                        this.state = 'waiting_for_sender';
+                        this.testBuffer = '';
+                    }
+
+                    return;
+                }
 
                 // Add noise floor filtering
                 if (tone.strength < 100) return; // Ignore weak signals
@@ -8636,6 +8711,56 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 });
             }
 
+            async sendTestPattern(pattern, speed) {
+                const profile = this.speedProfiles[speed];
+
+                // Send speed test header
+                await this.playTone(2500, 100); // Speed test marker
+                await this.delay(50);
+
+                // Send the pattern
+                const hexPattern = this.stringToHex(pattern);
+
+                for (let i = 0; i < hexPattern.length; i++) {
+                    const hexChar = parseInt(hexPattern[i], 16);
+                    const freq = 3000 + (hexChar * 100);
+                    await this.playTone(freq, profile.toneDuration);
+                    await this.delay(profile.interToneDelay);
+                }
+
+                // Wait for ACK/NACK
+                return await this.waitForSpeedAck(speed, 2000); // 2 second timeout
+            }
+
+            async waitForSpeedAck(speed, timeout) {
+                return new Promise((resolve) => {
+                    let ackReceived = false;
+                    const startTime = Date.now();
+
+                    // Temporarily override handleTone to listen for ACK
+                    const originalHandler = this.handleTone;
+
+                    this.handleTone = (tone) => {
+                        if (tone.name === 'ACK' || Math.abs(tone.freq - this.tones.ACK) < 100) {
+                            ackReceived = true;
+                            this.handleTone = originalHandler;
+                            resolve(true);
+                        } else if (tone.name === 'ERROR' || Math.abs(tone.freq - this.tones.ERROR) < 100) {
+                            this.handleTone = originalHandler;
+                            resolve(false);
+                        }
+                    };
+
+                    // Timeout handler
+                    setTimeout(() => {
+                        if (!ackReceived) {
+                            this.handleTone = originalHandler;
+                            resolve(false); // No response = too fast
+                        }
+                    }, timeout);
+                });
+            }
+
             // Frequency Band Testing Methods
             async measureBackgroundNoise(band) {
                 return new Promise((resolve) => {
@@ -8791,6 +8916,123 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         await this.delay(this.config.INTER_SYMBOL_DELAY);
                     }
                 }
+            }
+
+            async negotiateSpeed() {
+                this.updateStatus('🔧 Testing connection speed...');
+
+                const speeds = ['ultra-slow', 'slow', 'medium', 'fast', 'ultra-fast'];
+                let bestSpeed = 'ultra-slow';
+
+                for (let speed of speeds) {
+                    this.currentSpeed = speed;
+                    const profile = this.speedProfiles[speed];
+
+                    this.updateStatus(`📡 Testing ${profile.name} speed...`);
+
+                    // Send test pattern
+                    const testPattern = 'TEST_' + speed.toUpperCase();
+                    const success = await this.sendTestPattern(testPattern, speed);
+
+                    if (success) {
+                        bestSpeed = speed;
+                        this.speedTestResults[speed] = true;
+                        this.updateStatus(`✅ ${profile.name} speed works!`);
+
+                        // Try next speed
+                        continue;
+                    } else {
+                        // This speed failed, use previous one
+                        this.updateStatus(`❌ ${profile.name} too fast, using ${this.speedProfiles[bestSpeed].name}`);
+                        break;
+                    }
+                }
+
+                this.negotiatedSpeed = bestSpeed;
+                this.currentSpeed = bestSpeed;
+
+                const finalProfile = this.speedProfiles[bestSpeed];
+                this.config.TONE_DURATION = finalProfile.toneDuration;
+                this.config.INTER_SYMBOL_DELAY = finalProfile.interToneDelay;
+
+                this.updateStatus(`🎯 Using ${finalProfile.name} speed (${finalProfile.toneDuration}ms tones)`);
+
+                return bestSpeed;
+            }
+
+            async transmitDataAtNegotiatedSpeed() {
+                const profile = this.speedProfiles[this.negotiatedSpeed];
+
+                // Prepare data
+                const data = {
+                    u: currentUsername.substring(0, 10),
+                    a: {},
+                    t: Date.now()
+                };
+
+                const answers = classData.users[currentUsername]?.answers || {};
+                const recent = Object.keys(answers).slice(-5);
+
+                recent.forEach(qId => {
+                    const shortId = qId.substring(qId.lastIndexOf('-') + 1);
+                    data.a[shortId] = answers[qId].value || answers[qId];
+                });
+
+                const json = JSON.stringify(data);
+                const hexData = this.stringToHex(json);
+
+                console.log(`Transmitting ${hexData.length} bytes at ${profile.name} speed`);
+
+                // Send start pattern (always slow for reliability)
+                await this.playTone(3000, 150);
+                await this.delay(100);
+                await this.playTone(3500, 150);
+                await this.delay(100);
+                await this.playTone(4000, 150);
+                await this.delay(200);
+
+                // Send length
+                const lengthHex = hexData.length.toString(16).padStart(4, '0');
+                for (let char of lengthHex) {
+                    const freq = 3000 + (parseInt(char, 16) * 100);
+                    await this.playTone(freq, profile.toneDuration);
+                    await this.delay(profile.interToneDelay);
+                }
+
+                await this.delay(100);
+
+                // Send data at negotiated speed
+                for (let i = 0; i < hexData.length; i++) {
+                    const hexChar = parseInt(hexData[i], 16);
+                    const freq = 3000 + (hexChar * 100);
+                    await this.playTone(freq, profile.toneDuration);
+                    await this.delay(profile.interToneDelay);
+
+                    if (i % 16 === 0) {
+                        this.updateStatus(`📤 Sending: ${Math.round(i * 100 / hexData.length)}%`);
+                    }
+
+                    // Adaptive sync pauses based on speed
+                    if (this.negotiatedSpeed === 'ultra-slow' && i % 8 === 7) {
+                        await this.delay(200);
+                    } else if (this.negotiatedSpeed === 'slow' && i % 16 === 15) {
+                        await this.delay(100);
+                    } else if (this.negotiatedSpeed === 'medium' && i % 32 === 31) {
+                        await this.delay(50);
+                    }
+                }
+
+                // Send end pattern
+                await this.playTone(4000, 150);
+                await this.delay(100);
+                await this.playTone(3500, 150);
+                await this.delay(100);
+                await this.playTone(3000, 150);
+
+                const totalTime = (hexData.length * (profile.toneDuration + profile.interToneDelay)) / 1000;
+                this.updateStatus(`✅ Sent ${hexData.length} bytes in ~${totalTime.toFixed(1)}s`);
+
+                setTimeout(() => this.complete(), 3000);
             }
         }
 
