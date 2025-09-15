@@ -4356,6 +4356,15 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 `;
             }
 
+            // Audio transfer option
+            menuContent += `
+                <button onclick="showAudioSync(); this.closest('[style*=fixed]').remove();"
+                        class="sync-button" style="width: 100%; margin-bottom: 10px; background: #FF9800;">
+                    🔊 Audio Transfer
+                    <div style="font-size: 12px; opacity: 0.8;">Transfer via sound waves</div>
+                </button>
+            `;
+
             // Both get file import option
             menuContent += `
                 <input type="file" id="import-input" accept=".json" style="display:none;"
@@ -6553,6 +6562,370 @@ if (chartInstances[`dotplot-${questionId}`]) {
             setTimeout(() => {
                 localStorage.removeItem(`transfer_${code}`);
             }, 10 * 60 * 1000);
+        }
+
+        // Audio Data Transfer System
+        class AudioTransfer {
+            constructor() {
+                this.audioContext = null;
+                this.isTransmitting = false;
+                this.isListening = false;
+                this.receivedData = '';
+                this.frequencies = {
+                    start: 18000,  // Start marker
+                    end: 19000,    // End marker
+                    base: 15000,   // Base frequency for data
+                    spacing: 100   // Hz between different values
+                };
+            }
+
+            // Initialize audio context
+            init() {
+                this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+
+            // Encode data as audio tones
+            async transmitData() {
+                if (!this.audioContext) this.init();
+
+                // Prepare minimal data packet
+                const data = {
+                    u: currentUsername,
+                    t: Date.now(),
+                    a: {}
+                };
+
+                // Get last 5 answers to keep transmission short
+                const answers = classData.users[currentUsername].answers;
+                const recent = Object.keys(answers).slice(-5);
+                recent.forEach(qId => {
+                    data.a[qId] = answers[qId].value || answers[qId];
+                });
+
+                const json = JSON.stringify(data);
+                const encoded = btoa(json);
+
+                // Show transmission UI
+                this.showTransmitUI(encoded.length);
+
+                // Play tones
+                await this.playStartTone();
+                await this.delay(500);
+
+                for (let char of encoded) {
+                    await this.playDataTone(char);
+                    this.updateProgress(encoded.indexOf(char), encoded.length);
+                }
+
+                await this.delay(500);
+                await this.playEndTone();
+
+                this.transmissionComplete();
+            }
+
+            async playStartTone() {
+                await this.playTone(this.frequencies.start, 200);
+            }
+
+            async playEndTone() {
+                await this.playTone(this.frequencies.end, 200);
+            }
+
+            async playDataTone(char) {
+                // Convert character to frequency
+                const charCode = char.charCodeAt(0);
+                const freq = this.frequencies.base + (charCode * 2);
+                await this.playTone(freq, 50);
+                await this.delay(50); // Gap between tones
+            }
+
+            async playTone(frequency, duration) {
+                const oscillator = this.audioContext.createOscillator();
+                const gainNode = this.audioContext.createGain();
+
+                oscillator.connect(gainNode);
+                gainNode.connect(this.audioContext.destination);
+
+                oscillator.frequency.value = frequency;
+                oscillator.type = 'sine';
+
+                // Fade in/out to avoid clicks
+                gainNode.gain.setValueAtTime(0, this.audioContext.currentTime);
+                gainNode.gain.linearRampToValueAtTime(0.3, this.audioContext.currentTime + 0.01);
+                gainNode.gain.linearRampToValueAtTime(0.3, this.audioContext.currentTime + duration/1000 - 0.01);
+                gainNode.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + duration/1000);
+
+                oscillator.start();
+                oscillator.stop(this.audioContext.currentTime + duration/1000);
+
+                return new Promise(resolve => setTimeout(resolve, duration));
+            }
+
+            delay(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+            }
+
+            showTransmitUI(dataLength) {
+                const modal = document.createElement('div');
+                modal.id = 'audio-transmit';
+                modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 3000; display: flex; align-items: center; justify-content: center;';
+
+                modal.innerHTML = `
+                    <div style="background: white; padding: 40px; border-radius: 10px; text-align: center; max-width: 400px;">
+                        <h2>🔊 Transmitting Data</h2>
+
+                        <div style="font-size: 80px; margin: 20px 0;">📡</div>
+
+                        <div style="margin: 20px 0;">
+                            <div style="background: #f0f0f0; border-radius: 20px; height: 20px; overflow: hidden;">
+                                <div id="audio-progress" style="background: #4CAF50; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                            </div>
+                        </div>
+
+                        <p id="audio-status">Playing data tones...</p>
+                        <p style="color: #666; font-size: 14px;">Keep phones close together</p>
+
+                        <button onclick="audioTransfer.cancelTransmit()" class="submit-button" style="background: #f44336; margin-top: 20px;">
+                            Cancel
+                        </button>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+            }
+
+            updateProgress(current, total) {
+                const percent = (current / total) * 100;
+                const progressBar = document.getElementById('audio-progress');
+                if (progressBar) {
+                    progressBar.style.width = percent + '%';
+                }
+            }
+
+            transmissionComplete() {
+                const modal = document.getElementById('audio-transmit');
+                if (modal) {
+                    modal.querySelector('#audio-status').textContent = '✅ Transmission complete!';
+                    setTimeout(() => modal.remove(), 2000);
+                }
+            }
+
+            cancelTransmit() {
+                this.isTransmitting = false;
+                document.getElementById('audio-transmit')?.remove();
+            }
+
+            // Listening side
+            async startListening() {
+                if (!this.audioContext) this.init();
+
+                this.showListenUI();
+
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const source = this.audioContext.createMediaStreamSource(stream);
+                    const analyser = this.audioContext.createAnalyser();
+
+                    analyser.fftSize = 2048;
+                    source.connect(analyser);
+
+                    const bufferLength = analyser.frequencyBinCount;
+                    const dataArray = new Uint8Array(bufferLength);
+
+                    this.isListening = true;
+                    this.receivedData = '';
+
+                    const checkFrequencies = () => {
+                        if (!this.isListening) return;
+
+                        analyser.getByteFrequencyData(dataArray);
+
+                        // Detect tones and decode
+                        const detectedFreq = this.detectPeakFrequency(dataArray, analyser.context.sampleRate, bufferLength);
+
+                        if (detectedFreq) {
+                            if (Math.abs(detectedFreq - this.frequencies.start) < 50) {
+                                this.onStartToneDetected();
+                            } else if (Math.abs(detectedFreq - this.frequencies.end) < 50) {
+                                this.onEndToneDetected();
+                            } else if (detectedFreq > this.frequencies.base - 100 && detectedFreq < this.frequencies.base + 5000) {
+                                this.onDataToneDetected(detectedFreq);
+                            }
+                        }
+
+                        requestAnimationFrame(checkFrequencies);
+                    };
+
+                    checkFrequencies();
+                    this.currentStream = stream;
+
+                } catch(err) {
+                    console.error('Microphone error:', err);
+                    this.showMicError();
+                }
+            }
+
+            detectPeakFrequency(dataArray, sampleRate, bufferLength) {
+                // Find peak in frequency spectrum
+                let maxValue = 0;
+                let maxIndex = 0;
+
+                for (let i = 0; i < bufferLength; i++) {
+                    if (dataArray[i] > maxValue) {
+                        maxValue = dataArray[i];
+                        maxIndex = i;
+                    }
+                }
+
+                // Only return if signal is strong enough
+                if (maxValue > 200) {
+                    return maxIndex * sampleRate / (bufferLength * 2);
+                }
+                return null;
+            }
+
+            onStartToneDetected() {
+                document.getElementById('listen-status').textContent = '📡 Receiving data...';
+                this.receivedData = '';
+            }
+
+            onDataToneDetected(frequency) {
+                // Decode frequency back to character
+                const charCode = Math.round((frequency - this.frequencies.base) / 2);
+                const char = String.fromCharCode(charCode);
+                this.receivedData += char;
+
+                document.getElementById('listen-status').textContent = `Received ${this.receivedData.length} bytes...`;
+            }
+
+            onEndToneDetected() {
+                this.stopListening();
+
+                try {
+                    const decoded = JSON.parse(atob(this.receivedData));
+                    this.importReceivedAudio(decoded);
+                } catch(err) {
+                    console.error('Decode error:', err);
+                    document.getElementById('listen-status').textContent = '❌ Error decoding data';
+                }
+            }
+
+            importReceivedAudio(data) {
+                const imported = {
+                    users: {
+                        [data.u]: {
+                            answers: data.a,
+                            timestamps: {},
+                            reasons: {},
+                            attempts: {}
+                        }
+                    }
+                };
+
+                // Add timestamps
+                Object.keys(data.a).forEach(qId => {
+                    imported.users[data.u].timestamps[qId] = data.t;
+                });
+
+                mergeClassData(imported);
+
+                document.getElementById('listen-status').textContent = `✅ Received data from ${data.u}!`;
+                setTimeout(() => {
+                    document.getElementById('audio-listen')?.remove();
+                    loadProgress();
+                }, 2000);
+            }
+
+            showListenUI() {
+                const modal = document.createElement('div');
+                modal.id = 'audio-listen';
+                modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 3000; display: flex; align-items: center; justify-content: center;';
+
+                modal.innerHTML = `
+                    <div style="background: white; padding: 40px; border-radius: 10px; text-align: center; max-width: 400px;">
+                        <h2>🎤 Listening for Data</h2>
+
+                        <div style="font-size: 80px; margin: 20px 0;" class="pulse-animation">👂</div>
+
+                        <p id="listen-status">Waiting for transmission...</p>
+                        <p style="color: #666; font-size: 14px;">Keep phones close together</p>
+
+                        <button onclick="audioTransfer.stopListening()" class="submit-button" style="background: #f44336; margin-top: 20px;">
+                            Cancel
+                        </button>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+
+                // Add pulse animation
+                const style = document.createElement('style');
+                style.textContent = `
+                    .pulse-animation {
+                        animation: pulse 1.5s infinite;
+                    }
+                    @keyframes pulse {
+                        0% { transform: scale(1); }
+                        50% { transform: scale(1.1); }
+                        100% { transform: scale(1); }
+                    }
+                `;
+                document.head.appendChild(style);
+            }
+
+            stopListening() {
+                this.isListening = false;
+                if (this.currentStream) {
+                    this.currentStream.getTracks().forEach(track => track.stop());
+                }
+                document.getElementById('audio-listen')?.remove();
+            }
+
+            showMicError() {
+                document.getElementById('listen-status').innerHTML = `
+                    <span style="color: red;">❌ Microphone access denied</span><br>
+                    <small>Please allow microphone access and try again</small>
+                `;
+            }
+        }
+
+        // Initialize audio transfer
+        const audioTransfer = new AudioTransfer();
+
+        // Add to sync menu
+        window.showAudioSync = function() {
+            const modal = document.createElement('div');
+            modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 2000; display: flex; align-items: center; justify-content: center;';
+            modal.onclick = function(e) { if(e.target === modal) modal.remove(); };
+
+            modal.innerHTML = `
+                <div style="background: white; padding: 30px; border-radius: 10px; max-width: 350px; width: 90%; text-align: center;">
+                    <h2>🔊 Audio Transfer</h2>
+                    <p>Transfer data using sound waves!</p>
+
+                    <button onclick="audioTransfer.transmitData(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #4CAF50;">
+                        📡 Send (Play Sounds)
+                    </button>
+
+                    <button onclick="audioTransfer.startListening(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #2196F3;">
+                        🎤 Receive (Listen)
+                    </button>
+
+                    <div style="padding: 10px; background: #fff3e0; border-radius: 5px; margin: 10px 0; font-size: 12px;">
+                        ⚠️ Keep devices close and volume up!
+                    </div>
+
+                    <button onclick="this.closest('[style*=fixed]').remove()"
+                            style="width: 100%; padding: 10px; background: none;
+                                   border: 1px solid #ccc; border-radius: 4px;">
+                        Cancel
+                    </button>
+                </div>
+            `;
+
+            document.body.appendChild(modal);
         }
     </script>
 </body>
