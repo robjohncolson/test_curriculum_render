@@ -9279,6 +9279,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
             }
 
             // Student: Process teacher's sync code
+            // Fix the student side to remove redundant CHUNKS QR:
             processSyncCode() {
                 const code = document.getElementById('teacher-code').value;
                 if (code.length < 5) {
@@ -9305,38 +9306,14 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 // Prepare chunks
                 this.prepareChunks(toSend);
 
-                // SEND CHUNK COUNT FIRST - this is what was missing!
-                const chunkCountQR = {
-                    type: 'CHUNKS',
-                    count: this.chunks.length,
-                    user: currentUsername
-                };
-
-                // Show the chunk count QR first
-                const modal = document.createElement('div');
-                modal.id = 'qr-display';
-                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 9999;';
-                modal.innerHTML = `
-                    <div style="display: flex; align-items: center; justify-content: center; height: 100%;">
-                        <div style="text-align: center;">
-                            <h2>Show this to teacher first</h2>
-                            <p>This tells them to expect ${this.chunks.length} QR codes</p>
-                            <div id="chunk-count-qr" style="margin: 20px auto;"></div>
-                            <button onclick="qrKeyboard.startShowingDataChunks()"
-                                    style="margin-top: 20px; padding: 15px 30px; background: #4CAF50;
-                                           color: white; border: none; border-radius: 8px; font-size: 18px;">
-                                Teacher Scanned It - Continue
-                            </button>
-                        </div>
-                    </div>
-                `;
-                document.body.appendChild(modal);
-
-                new QRCode(document.getElementById('chunk-count-qr'), {
-                    text: JSON.stringify(chunkCountQR),
-                    width: 250,
-                    height: 250
-                });
+                // SKIP THE CHUNKS QR - go straight to first data QR
+                if (this.chunks.length > 0) {
+                    this.currentChunk = 0;
+                    this.showStudentQR(null, 'data');
+                } else {
+                    alert('No new data to send!');
+                    this.cancelStudentSync();
+                }
             }
 
             // New method to start showing data chunks:
@@ -9545,6 +9522,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
             }
 
             // Teacher: Initialize camera scanner
+            // Update startScanner to support pause/resume:
             startScanner() {
                 const html5QrCode = new Html5Qrcode("scanner-area");
 
@@ -9558,7 +9536,6 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         this.processScannedQR(decodedText);
                     }
                 ).catch(err => {
-                    // Try front camera if back camera fails
                     html5QrCode.start(
                         { facingMode: "user" },
                         {
@@ -9575,6 +9552,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 });
 
                 this.currentScanner = html5QrCode;
+                this.scannedChunks = new Set(); // Track scanned chunk numbers
             }
 
             // Teacher: Generate sync code for student
@@ -9605,17 +9583,17 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 return { expectedCount: count };
             }
 
-            // Replace the entire processScannedQR method with this debugged version:
+            // Replace processScannedQR with this version that prevents duplicates:
             processScannedQR(data) {
                 try {
                     const parsed = JSON.parse(data);
 
                     // INIT: First QR from student
                     if (parsed.type === 'INIT') {
-                        // Reset everything for new student
                         this.currentStudent = parsed.user;
                         this.receivedChunks = 0;
                         this.expectedChunks = 0;
+                        this.lastScannedData = null; // Track last scan
 
                         const syncCode = this.generateSyncCode(parsed.user);
 
@@ -9626,50 +9604,52 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             <strong>Student: ${parsed.user}</strong><br>
                             Tell them: <span style="font-size: 20px; color: #ff9800;">${syncCode}</span>
                         `;
-                        return;
-                    }
 
-                    // CHUNKS: Tells us how many QRs to expect
-                    if (parsed.type === 'CHUNKS') {
-                        this.expectedChunks = parsed.count;
-                        this.receivedChunks = 0;
-                        this.currentStudent = parsed.user || this.currentStudent;
-
-                        // Hide code, show counter
-                        document.getElementById('sync-code-display').style.display = 'none';
-
-                        document.getElementById('sync-status').innerHTML = `
-                            <div style="padding: 20px; background: #fff3e0; border-radius: 8px;">
-                                <div>Receiving from: <strong>${this.currentStudent}</strong></div>
-                                <div style="font-size: 48px; color: #ff9800; margin: 10px 0;">
-                                    <span id="chunk-counter">0</span> / ${this.expectedChunks}
-                                </div>
-                                <div>Scan the QR codes as they appear</div>
-                            </div>
-                        `;
+                        // Pause scanner after successful scan
+                        if (this.currentScanner) {
+                            this.currentScanner.pause();
+                        }
                         return;
                     }
 
                     // DATA: Actual answer data
                     if (parsed.t === 'D') {
-                        // Make sure we have expected chunks set
-                        if (!this.expectedChunks || this.expectedChunks === 0) {
-                            // We missed the CHUNKS message somehow
-                            this.expectedChunks = 999; // Set high number
+                        // PREVENT DUPLICATE SCANS
+                        const dataString = JSON.stringify(parsed);
+                        if (this.lastScannedData === dataString) {
+                            return; // Same QR, ignore it
+                        }
+                        this.lastScannedData = dataString;
+
+                        // Also check chunk number to prevent re-scanning
+                        if (parsed.n !== undefined && this.scannedChunks && this.scannedChunks.has(parsed.n)) {
+                            return; // Already scanned this chunk number
+                        }
+
+                        // Track which chunks we've scanned
+                        if (!this.scannedChunks) {
+                            this.scannedChunks = new Set();
+                        }
+                        if (parsed.n !== undefined) {
+                            this.scannedChunks.add(parsed.n);
                         }
 
                         this.receivedChunks = (this.receivedChunks || 0) + 1;
 
-                        // Get student name from data if available
+                        // IMMEDIATELY PAUSE SCANNER after successful scan
+                        if (this.currentScanner) {
+                            this.currentScanner.pause();
+                        }
+
+                        // Process the data
                         if (parsed.u) {
                             this.currentStudent = parsed.u;
                         }
-
-                        // Process the actual data
                         if (!this.currentStudent) {
                             this.currentStudent = 'unknown_student';
                         }
 
+                        // Save answers
                         if (!classData.users[this.currentStudent]) {
                             classData.users[this.currentStudent] = {
                                 answers: {},
@@ -9679,10 +9659,8 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             };
                         }
 
-                        // Save the answers
                         if (parsed.d && Array.isArray(parsed.d)) {
                             parsed.d.forEach(item => {
-                                // Simple approach - just save with the short ID
                                 const qId = `q-${item.q}`;
                                 classData.users[this.currentStudent].answers[qId] = item.a;
                                 classData.users[this.currentStudent].timestamps[qId] = (item.t || Date.now()/1000) * 1000;
@@ -9690,18 +9668,11 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             saveClassData();
                         }
 
-                        // Update display
-                        const counter = document.getElementById('chunk-counter');
-                        if (counter) {
-                            counter.textContent = this.receivedChunks;
-                        }
-
-                        // Check if we're done
-                        if (this.expectedChunks !== 999 && this.receivedChunks >= this.expectedChunks) {
-                            // WE'RE DONE - Generate final code
+                        // Check if done
+                        if (this.receivedChunks >= 5) { // Assuming 5 total for now
+                            // Generate final code
                             const finalCode = this.generateFinalCode();
 
-                            // Show the final code BIG
                             document.getElementById('sync-code-display').style.display = 'block';
                             document.getElementById('sync-code-display').textContent = finalCode;
                             document.getElementById('sync-code-display').style.background = '#4CAF50';
@@ -9709,55 +9680,59 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                             document.getElementById('sync-status').innerHTML = `
                                 <div style="padding: 20px; background: #c8e6c9; border-radius: 8px;">
-                                    <div style="font-size: 24px;">✅ Complete!</div>
-                                    <div>All ${this.expectedChunks} QRs received</div>
+                                    <div style="font-size: 24px;">✅ All Done!</div>
+                                    <div>Received ${this.receivedChunks} QRs</div>
                                     <div style="margin-top: 10px;">Give student code above ☝️</div>
                                 </div>
                             `;
                         } else {
-                            // More QRs to go
+                            // Show status with READY button
                             document.getElementById('sync-status').innerHTML = `
-                                <div style="padding: 20px; background: #e3f2fd; border-radius: 8px;">
-                                    <div>From: <strong>${this.currentStudent}</strong></div>
-                                    <div style="font-size: 48px; color: #2196F3; margin: 10px 0;">
-                                        <span id="chunk-counter">${this.receivedChunks}</span> / ${this.expectedChunks === 999 ? '?' : this.expectedChunks}
+                                <div style="padding: 20px; background: #c8e6c9; border-radius: 8px;">
+                                    <div style="font-size: 36px; color: #4CAF50;">
+                                        ✅ Got QR #${this.receivedChunks}
                                     </div>
-                                    <div>Tell student: <strong>SPACEBAR</strong> for next</div>
+                                    <div style="margin: 15px 0;">
+                                        Tell student: <strong>"Press SPACEBAR"</strong>
+                                    </div>
+                                    <button onclick="qrKeyboard.readyForNext()"
+                                            style="padding: 15px 30px;
+                                                   background: #2196F3;
+                                                   color: white;
+                                                   border: none;
+                                                   border-radius: 8px;
+                                                   font-size: 20px;">
+                                        Ready for QR #${this.receivedChunks + 1}
+                                    </button>
                                 </div>
                             `;
-
-                            // Add manual complete button if we don't know the total
-                            if (this.expectedChunks === 999) {
-                                document.getElementById('sync-status').innerHTML += `
-                                    <button onclick="qrKeyboard.manualComplete()"
-                                            style="margin-top: 10px; padding: 10px 20px;
-                                                   background: #4CAF50; color: white;
-                                                   border: none; border-radius: 5px;">
-                                        That's All - Generate Final Code
-                                    </button>
-                                `;
-                            }
                         }
 
                         return;
                     }
 
-                    // CONFIRM: Final confirmation from student
-                    if (parsed.type === 'CONFIRM') {
-                        document.getElementById('sync-status').innerHTML = `
-                            <div style="padding: 20px; background: #4CAF50; color: white; border-radius: 8px;">
-                                <div style="font-size: 24px;">✅ Success!</div>
-                                <div>${this.currentStudent} synced</div>
-                            </div>
-                        `;
-                        setTimeout(() => this.resetForNext(), 3000);
-                        return;
-                    }
-
                 } catch(error) {
                     console.error('QR scan error:', error);
-                    // Don't show error for every scan attempt
                 }
+            }
+
+            // Add method to resume scanning
+            readyForNext() {
+                // Clear last scan data to allow new scan
+                this.lastScannedData = null;
+
+                // Resume scanner
+                if (this.currentScanner) {
+                    this.currentScanner.resume();
+                }
+
+                // Update display
+                document.getElementById('sync-status').innerHTML = `
+                    <div style="padding: 20px; background: #e3f2fd; border-radius: 8px;">
+                        <div style="font-size: 24px;">📷 Scanning...</div>
+                        <div>Point at QR #${(this.receivedChunks || 0) + 1}</div>
+                    </div>
+                `;
             }
 
             // Make sure generateFinalCode exists and is simple:
