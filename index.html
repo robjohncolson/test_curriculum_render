@@ -9302,17 +9302,47 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     }
                 });
 
-                // Prepare chunks and show first QR
+                // Prepare chunks
                 this.prepareChunks(toSend);
 
-                // Show chunk count info, then immediately show first data QR
-                if (this.chunks.length > 0) {
-                    this.currentChunk = 0;
-                    this.showStudentQR(null, 'data');
-                } else {
-                    alert('No new data to send!');
-                    this.cancelStudentSync();
-                }
+                // SEND CHUNK COUNT FIRST - this is what was missing!
+                const chunkCountQR = {
+                    type: 'CHUNKS',
+                    count: this.chunks.length,
+                    user: currentUsername
+                };
+
+                // Show the chunk count QR first
+                const modal = document.createElement('div');
+                modal.id = 'qr-display';
+                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 9999;';
+                modal.innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: center; height: 100%;">
+                        <div style="text-align: center;">
+                            <h2>Show this to teacher first</h2>
+                            <p>This tells them to expect ${this.chunks.length} QR codes</p>
+                            <div id="chunk-count-qr" style="margin: 20px auto;"></div>
+                            <button onclick="qrKeyboard.startShowingDataChunks()"
+                                    style="margin-top: 20px; padding: 15px 30px; background: #4CAF50;
+                                           color: white; border: none; border-radius: 8px; font-size: 18px;">
+                                Teacher Scanned It - Continue
+                            </button>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                new QRCode(document.getElementById('chunk-count-qr'), {
+                    text: JSON.stringify(chunkCountQR),
+                    width: 250,
+                    height: 250
+                });
+            }
+
+            // New method to start showing data chunks:
+            startShowingDataChunks() {
+                this.currentChunk = 0;
+                this.showStudentQR(null, 'data');
             }
 
             // Much more efficient chunk preparation
@@ -9596,24 +9626,35 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         return;
                     }
 
-                    // Handle compressed data chunks - FIX THE FORMAT CHECK
-                    if (parsed.t === 'D' || parsed.type === 'DATA') {  // Check both formats
+                    // Handle chunk count - THIS IS IMPORTANT
+                    if (parsed.type === 'CHUNKS') {
+                        this.expectedChunks = parsed.count;
+                        this.receivedChunks = 0;
+                        this.currentStudent = parsed.user;
 
-                        // Get student username from the data
+                        // Hide the sync code
+                        document.getElementById('sync-code-display').style.display = 'none';
+
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="font-size: 24px; color: #2196F3;">
+                                Expecting ${parsed.count} QR codes from ${parsed.user}
+                            </div>
+                            <div style="font-size: 48px; margin: 20px 0;">
+                                <span id="chunk-counter">0</span> / ${parsed.count}
+                            </div>
+                            <div>Point camera at next QR</div>
+                        `;
+                        return;
+                    }
+
+                    // Handle data chunks
+                    if (parsed.t === 'D' || parsed.type === 'DATA') {
+
                         if (parsed.u) {
                             this.currentStudent = parsed.u;
                         }
 
-                        // Initialize counts if needed
-                        if (!this.receivedChunks) {
-                            this.receivedChunks = 0;
-                            this.expectedChunks = this.expectedChunks || 999;
-                        }
-
                         this.receivedChunks++;
-
-                        // Hide code display during data transfer
-                        document.getElementById('sync-code-display').style.display = 'none';
 
                         // Process the data
                         if (!classData.users[this.currentStudent]) {
@@ -9625,26 +9666,19 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             };
                         }
 
-                        // Handle the data array
                         const dataArray = parsed.d || parsed.data;
                         if (Array.isArray(dataArray)) {
                             dataArray.forEach(item => {
-                                // Try multiple ID resolution strategies
                                 let fullQId = null;
-
-                                // Strategy 1: Look for exact match in curriculum
                                 for (let q of this.curriculum) {
                                     if (q.id.includes(item.q) || q.id.endsWith(item.q)) {
                                         fullQId = q.id;
                                         break;
                                     }
                                 }
-
-                                // Strategy 2: If not found, use as-is with prefix
                                 if (!fullQId) {
                                     fullQId = `question-${item.q}`;
                                 }
-
                                 classData.users[this.currentStudent].answers[fullQId] = item.a;
                                 classData.users[this.currentStudent].timestamps[fullQId] = item.t * 1000;
                             });
@@ -9652,30 +9686,40 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                         saveClassData();
 
-                        // Update status with clear count
-                        let buttonHtml = '';
-                        if (this.receivedChunks === 1) {
-                            buttonHtml = `
-                                <div style="margin-top: 20px;">
-                                    <button onclick="finishStudentSync()"
-                                            style="padding: 10px 20px; background: #2196F3; color: white;
-                                                   border: none; border-radius: 5px; font-size: 16px;">
-                                        Generate Final Code
-                                    </button>
+                        // Update counter
+                        if (document.getElementById('chunk-counter')) {
+                            document.getElementById('chunk-counter').textContent = this.receivedChunks;
+                        }
+
+                        // CHECK IF WE'RE DONE
+                        if (this.receivedChunks >= this.expectedChunks) {
+                            // AUTO-GENERATE FINAL CODE!
+                            const finalCode = 'DONE' + Math.floor(Math.random() * 10);
+
+                            document.getElementById('sync-code-display').style.display = 'block';
+                            document.getElementById('sync-code-display').textContent = finalCode;
+                            document.getElementById('sync-code-display').style.background = '#4CAF50';
+                            document.getElementById('sync-code-display').style.color = 'white';
+
+                            document.getElementById('sync-status').innerHTML = `
+                                <div style="font-size: 24px; color: #4CAF50;">
+                                    ✅ All ${this.expectedChunks} QRs received!
                                 </div>
+                                <div style="margin-top: 20px;">
+                                    Give student the code above ☝️
+                                </div>
+                            `;
+                        } else {
+                            // More to go
+                            document.getElementById('sync-status').innerHTML = `
+                                <div style="font-size: 48px; margin: 20px 0;">
+                                    <span id="chunk-counter">${this.receivedChunks}</span> / ${this.expectedChunks}
+                                </div>
+                                <div>Tell student: <strong>PRESS SPACEBAR</strong></div>
                             `;
                         }
 
-                        document.getElementById('sync-status').innerHTML = `
-                            <div style="font-size: 36px; color: #4CAF50;">
-                                ✅ ${this.receivedChunks}
-                            </div>
-                            <div>QR codes received</div>
-                            <div style="margin-top: 10px;">Tell student: <strong>PRESS SPACEBAR</strong></div>
-                            ${buttonHtml}
-                        `;
-
-                        // Flash green briefly
+                        // Flash green
                         document.getElementById('sync-status').style.background = '#c8e6c9';
                         setTimeout(() => {
                             document.getElementById('sync-status').style.background = '#e3f2fd';
@@ -9684,16 +9728,24 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         return;
                     }
 
+                    // Handle final confirmation
+                    if (parsed.type === 'CONFIRM') {
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="font-size: 24px; color: #4CAF50;">
+                                ✅ ${this.currentStudent} synced successfully!
+                            </div>
+                        `;
+                        setTimeout(() => this.resetForNext(), 3000);
+                        return;
+                    }
+
                 } catch(error) {
-                    // More helpful error display
                     document.getElementById('sync-status').innerHTML = `
                         <div style="color: red;">
                             ❌ Scan Error<br>
-                            <small>Try holding steady</small>
+                            <small>Try again</small>
                         </div>
                     `;
-
-                    // Auto-clear error after 2 seconds
                     setTimeout(() => {
                         document.getElementById('sync-status').innerHTML = '📷 Ready to scan';
                     }, 2000);
