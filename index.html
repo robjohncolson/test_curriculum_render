@@ -6612,18 +6612,21 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                 this.updateStatus('📡 Sending HELLO...');
 
+                // Clear any existing timeout first
+                clearTimeout(this.timeout);
+
                 // Pause listening while transmitting
                 this.pauseListening();
                 await this.playTone(this.tones.HELLO, 500);
 
-                // CRITICAL: Resume listening and wait for response
+                // CRITICAL: Resume listening immediately
                 this.resumeListening();
                 this.updateStatus('👂 Listening for response...');
 
-                // Give phone time to respond before next HELLO
+                // Set up next HELLO, but with a longer window for response
                 this.timeout = setTimeout(() => {
                     if (this.state === 'handshaking') {
-                        this.sendHelloWithListening(); // Retry
+                        this.sendHelloWithListening(); // Retry only if still handshaking
                     }
                 }, this.helloInterval);
             }
@@ -6662,8 +6665,10 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 this.currentStream = stream;
                 this.dataBuffer = '';
                 this.expectedLength = 0;
+                this.analyser = analyser;
+                this.dataArray = dataArray;
 
-                const listen = () => {
+                this.listen = () => {
                     if (!this.isListening) return;
 
                     analyser.getByteFrequencyData(dataArray);
@@ -6673,10 +6678,10 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         this.handleTone(tone);
                     }
 
-                    requestAnimationFrame(listen);
+                    this.animationFrame = requestAnimationFrame(this.listen);
                 };
 
-                listen();
+                this.listen();
             }
 
             // Add visual feedback for audio detection
@@ -6746,19 +6751,10 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                     case 'handshaking':
                         if (tone.name === 'ACK') {
-                            clearTimeout(this.timeout);  // Stop sending HELLOs
+                            clearTimeout(this.timeout);  // Stop sending HELLOs immediately
                             this.updateStatus('✅ ACK received! Waiting for READY...');
                             this.state = 'waiting_ready';
-                        } else if (tone.name === 'READY') {
-                            // Sometimes ACK and READY come together
-                            clearTimeout(this.timeout);
-                            this.updateStatus('📤 Peer ready! Sending data...');
-                            this.state = 'sending_data';
-
-                            setTimeout(async () => {
-                                this.pauseListening();
-                                await this.transmitData();
-                            }, 500);
+                            // Don't send another HELLO - just listen
                         }
                         break;
 
@@ -6767,6 +6763,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             this.updateStatus('📤 Peer ready! Sending data...');
                             this.state = 'sending_data';
 
+                            // Stop listening before transmitting data
                             setTimeout(async () => {
                                 this.pauseListening();
                                 await this.transmitData();
@@ -6808,12 +6805,20 @@ if (chartInstances[`dotplot-${questionId}`]) {
             }
 
             pauseListening() {
-                // Temporarily stop processing audio
                 this.isListening = false;
+                // Also clear any pending analysis frames
+                if (this.animationFrame) {
+                    cancelAnimationFrame(this.animationFrame);
+                    this.animationFrame = null;
+                }
             }
 
             resumeListening() {
                 this.isListening = true;
+                // Restart the listening loop if needed
+                if (this.listen && !this.animationFrame) {
+                    this.listen();
+                }
             }
 
             async transmitData() {
@@ -6860,7 +6865,9 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 await this.delay(500);
                 await this.playTone(this.tones.DONE, 500);
 
-                this.state = 'waiting_done_ack';
+                // After sending DONE, switch to listening for response data
+                this.state = 'waiting_peer_data';
+                this.updateStatus('👂 Listening for peer data...');
                 this.resumeListening();
             }
 
@@ -6981,7 +6988,10 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
             updateStatus(message) {
                 const status = document.getElementById('protocol-status');
-                if (status) status.textContent = message;
+                if (status) {
+                    const listeningIndicator = this.isListening ? '🎧' : '🔇';
+                    status.textContent = `${listeningIndicator} ${message}`;
+                }
             }
 
             updateDataProgress() {
