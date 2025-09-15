@@ -9303,6 +9303,25 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     }
                 });
 
+                // After calculating toSend array:
+                if (toSend.length === 0) {
+                    // No new data to send
+                    document.getElementById('student-sync-display').innerHTML = `
+                        <div style="padding: 30px; text-align: center;">
+                            <div style="font-size: 48px; margin-bottom: 20px;">✅</div>
+                            <h2>Already Synced!</h2>
+                            <p>Teacher already has all your current answers.</p>
+                            <button onclick="qrKeyboard.cancelStudentSync()"
+                                    style="margin-top: 20px; padding: 10px 30px;
+                                           background: #4CAF50; color: white;
+                                           border: none; border-radius: 5px;">
+                                OK
+                            </button>
+                        </div>
+                    `;
+                    return;
+                }
+
                 // Prepare chunks
                 this.prepareChunks(toSend);
 
@@ -9497,43 +9516,53 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 `;
             }
 
-            // Replace startTeacherReceive with this cleaner version:
             startTeacherReceive() {
                 const modal = document.createElement('div');
                 modal.id = 'teacher-receive';
                 modal.innerHTML = `
                     <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-                                background: white; z-index: 9999; overflow-y: auto;">
+                                background: white; z-index: 9999; display: flex; flex-direction: column;">
 
-                        <!-- Camera view at top -->
-                        <div style="background: #f5f5f5; padding: 10px;">
+                        <!-- Fixed camera area at top -->
+                        <div style="background: #f5f5f5; padding: 10px; flex-shrink: 0;">
                             <div id="scanner-area" style="width: 100%; max-width: 300px; height: 300px; margin: 0 auto;"></div>
                         </div>
 
-                        <!-- Status message -->
-                        <div id="sync-status" style="padding: 15px; text-align: center; background: #e3f2fd; margin: 10px;">
-                            📷 Ready to scan student's first QR
+                        <!-- Scrollable content area -->
+                        <div style="flex: 1; overflow-y: auto; padding-bottom: 80px;">
+                            <!-- Status message -->
+                            <div id="sync-status" style="padding: 15px; text-align: center; background: #e3f2fd; margin: 10px;">
+                                📷 Ready to scan student's first QR
+                            </div>
+
+                            <!-- Code display -->
+                            <div id="sync-code-display"
+                                 style="display: none;
+                                        text-align: center;
+                                        margin: 20px;
+                                        padding: 30px;
+                                        background: #ffeb3b;
+                                        border: 3px solid #000;
+                                        border-radius: 10px;
+                                        font-size: 48px;
+                                        letter-spacing: 15px;
+                                        font-family: monospace;
+                                        font-weight: bold;">
+                            </div>
                         </div>
 
-                        <!-- Code display - PROMINENT when shown -->
-                        <div id="sync-code-display"
-                             style="display: none;
-                                    text-align: center;
-                                    margin: 20px;
-                                    padding: 30px;
-                                    background: #ffeb3b;
-                                    border: 3px solid #000;
-                                    border-radius: 10px;
-                                    font-size: 60px;
-                                    letter-spacing: 15px;
-                                    font-family: monospace;
-                                    font-weight: bold;">
-                        </div>
-
-                        <!-- Cancel button at bottom -->
-                        <div style="position: fixed; bottom: 20px; left: 20px; right: 20px;">
+                        <!-- Fixed buttons at bottom -->
+                        <div style="position: fixed; bottom: 0; left: 0; right: 0;
+                                    background: white; padding: 10px;
+                                    border-top: 1px solid #ccc; display: flex; gap: 10px;">
+                            <button onclick="qrKeyboard.finishTeacherSync()"
+                                    id="finish-btn"
+                                    style="flex: 1; padding: 15px; background: #4CAF50; color: white;
+                                           border: none; border-radius: 8px; font-size: 18px;">
+                                Finish & Save
+                            </button>
                             <button onclick="qrKeyboard.cancelTeacherSync()"
-                                    style="width: 100%; padding: 15px; background: #f44336; color: white;
+                                    style="flex: 1; padding: 15px; background: #f44336; color: white;
                                            border: none; border-radius: 8px; font-size: 18px;">
                                 Cancel
                             </button>
@@ -9541,7 +9570,6 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     </div>
                 `;
                 document.body.appendChild(modal);
-
                 this.startScanner();
             }
 
@@ -9583,21 +9611,22 @@ if (chartInstances[`dotplot-${questionId}`]) {
             generateSyncCode(username) {
                 const userInPhone = classData.users[username] || {};
                 const answers = userInPhone.answers || {};
+                const timestamps = userInPhone.timestamps || {};
 
-                // Create a 5-character code representing what we have
-                // Format: 2 chars for count, 3 chars for checksum
+                // Get most recent timestamp
+                let mostRecent = 0;
+                Object.values(timestamps).forEach(t => {
+                    if (t > mostRecent) mostRecent = t;
+                });
+
+                // Create a 5-character code that encodes both count and recency
                 const count = Object.keys(answers).length;
                 const countCode = count.toString(36).padStart(2, '0').toUpperCase();
 
-                // Simple checksum of question IDs
-                let checksum = 0;
-                Object.keys(answers).forEach(qId => {
-                    const shortId = qId.replace(/^.*-/, '');
-                    checksum += shortId.charCodeAt(0);
-                });
-                const checksumCode = (checksum % 46656).toString(36).padStart(3, '0').toUpperCase();
+                // Use last 3 digits of timestamp for uniqueness
+                const timeCode = (mostRecent % 46656).toString(36).padStart(3, '0').toUpperCase();
 
-                return countCode + checksumCode;
+                return countCode + timeCode;
             }
 
             // Decode sync code
@@ -9982,6 +10011,42 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                 document.getElementById('sync-code-display').style.display = 'none';
                 document.getElementById('sync-status').textContent = 'Ready for next student';
+            }
+
+            finishTeacherSync() {
+                // Stop the scanner
+                if (this.currentScanner) {
+                    this.currentScanner.stop();
+                }
+
+                // Save the data one more time to be sure
+                saveClassData();
+
+                // Show success message
+                const modal = document.createElement('div');
+                modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 10000; display: flex; align-items: center; justify-content: center;';
+                modal.innerHTML = `
+                    <div style="background: white; padding: 30px; border-radius: 10px; text-align: center;">
+                        <div style="font-size: 48px; margin-bottom: 20px;">✅</div>
+                        <h2>Sync Complete!</h2>
+                        <p>Successfully saved data from:<br><strong>${this.currentStudent || 'student'}</strong></p>
+                        <p style="color: #666; margin-top: 10px;">
+                            Received ${this.receivedChunks || 0} data chunks
+                        </p>
+                        <button onclick="this.closest('[style*=fixed]').remove(); document.getElementById('teacher-receive')?.remove(); loadProgress();"
+                                style="margin-top: 20px; padding: 10px 30px; background: #4CAF50;
+                                       color: white; border: none; border-radius: 5px; font-size: 16px;">
+                            OK
+                        </button>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                // Reset for next sync
+                this.currentStudent = null;
+                this.receivedChunks = 0;
+                this.expectedChunks = 0;
+                this.scannedChunks = new Set();
             }
         }
 
