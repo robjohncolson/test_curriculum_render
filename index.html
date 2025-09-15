@@ -7002,6 +7002,38 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 this.transmitWithHeader();
             }
 
+            async startAsSender() {
+                if (!this.audioContext) this.init();
+
+                this.role = 'sender';
+                this.state = 'ready_to_send';
+
+                this.showSenderUI();
+
+                // Send a clear "I am sender" beacon
+                await this.playTone(this.tones.HELLO, 200);
+                await this.delay(100);
+                await this.playTone(this.tones.READY, 200);
+
+                // Wait a moment then start sending data
+                setTimeout(async () => {
+                    this.updateStatus('📤 Transmitting data...');
+                    await this.transmitDataReliable();
+                }, 1000);
+            }
+
+            async startAsReceiver() {
+                if (!this.audioContext) this.init();
+
+                this.role = 'receiver';
+                this.state = 'waiting_for_sender';
+
+                this.showReceiverUI();
+                await this.startListening();
+
+                this.updateStatus('👂 Listening for sender...');
+            }
+
             async transmitWithHeader() {
                 // Send a header tone pattern - no delays
                 await this.playTone(2000, 50);
@@ -7404,123 +7436,47 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 console.log(`Generated test tone: ${frequency}Hz for ${duration}ms`);
             }
 
-            // Modified responder to send ACK immediately
             async handleTone(tone) {
-                const now = Date.now();
+                if (this.role !== 'receiver') return;
 
-                // Less aggressive debouncing
-                if (this.lastTone === tone.name && now - this.lastToneTime < 50) return;
-                this.lastTone = tone.name;
-                this.lastToneTime = now;
-
-                // Initialize tone stats if not exists
-                if (!this.toneStats) {
-                    this.toneStats = {
-                        expected: 0,
-                        received: 0,
-                        noise: 0,
-                        lastGoodTone: Date.now()
-                    };
-                }
-
-                // Track received tones
-                this.toneStats.received++;
-
-                console.log(`Detected: ${tone.name} in state ${this.state}`);
-
-                // Check transmission quality and adapt timing if needed
-                if (this.toneStats.received > 10) { // Only check after some samples
-                    const quality = this.toneStats.received / Math.max(this.toneStats.expected + this.toneStats.received, 1);
-
-                    // If quality drops below 80%, slow down transmission
-                    if (quality < 0.8) {
-                        console.log(`Quality degraded (${Math.round(quality * 100)}%), slowing down...`);
-                        this.config.TONE_DURATION *= 1.5;
-                        this.config.INTER_SYMBOL_DELAY *= 1.5;
-
-                        // Prevent runaway slowdown
-                        if (this.config.TONE_DURATION > 200) this.config.TONE_DURATION = 200;
-                        if (this.config.INTER_SYMBOL_DELAY > 100) this.config.INTER_SYMBOL_DELAY = 100;
-
-                        console.log(`New timing: ${this.config.TONE_DURATION}ms tones, ${this.config.INTER_SYMBOL_DELAY}ms delay`);
+                // Detect start pattern
+                if (this.state === 'waiting_for_sender') {
+                    if (tone.freq >= 2900 && tone.freq <= 3100) {
+                        this.state = 'receiving_header';
+                        this.headerBuffer = '';
+                        this.updateStatus('📥 Receiving header...');
                     }
                 }
 
-                switch (this.state) {
-                    case 'listening_hello':
-                        if (tone.name === 'HELLO') {
-                            this.updateStatus('📞 HELLO received! Sending ACK...');
-                            this.state = 'sending_ack';
+                // Receive length header
+                else if (this.state === 'receiving_header') {
+                    if (tone.freq >= 3000 && tone.freq <= 4500) {
+                        const hexVal = Math.round((tone.freq - 3000) / 100);
+                        this.headerBuffer += hexVal.toString(16);
 
-                            // Quick pause, send ACK, then READY - no delays
-                            setTimeout(async () => {
-                                this.pauseListening();
-
-                                await this.playTone(this.tones.ACK, 100); // Faster ACK
-                                await this.playTone(this.tones.READY, 100); // Faster READY
-
-                                this.state = 'receiving_data';
-                                this.dataBuffer = '';
-                                this.expectedLength = 0;
-
-                                this.updateStatus('🎤 Ready to receive data...');
-                                this.resumeListening();
-                            }, 100);  // Very quick response
+                        if (this.headerBuffer.length === 4) {
+                            this.expectedLength = parseInt(this.headerBuffer, 16);
+                            this.dataBuffer = '';
+                            this.state = 'receiving_data';
+                            this.updateStatus(`📥 Expecting ${this.expectedLength} bytes...`);
                         }
-                        break;
+                    }
+                }
 
-                    case 'handshaking':
-                        if (tone.name === 'ACK') {
-                            clearTimeout(this.timeout);  // Stop sending HELLOs immediately
-                            this.updateStatus('✅ ACK received! Waiting for READY...');
-                            this.state = 'waiting_ready';
-                            // Don't send another HELLO - just listen
+                // Receive data
+                else if (this.state === 'receiving_data') {
+                    if (tone.freq >= 3000 && tone.freq <= 4500) {
+                        const hexVal = Math.round((tone.freq - 3000) / 100);
+                        this.dataBuffer += hexVal.toString(16);
+
+                        if (this.dataBuffer.length % 32 === 0) {
+                            this.updateStatus(`📥 Received ${this.dataBuffer.length}/${this.expectedLength}`);
                         }
-                        break;
 
-                    case 'waiting_ready':
-                        if (tone.name === 'READY') {
-                            this.updateStatus('📤 Peer ready! Sending data...');
-                            this.state = 'sending_data';
-
-                            // Stop listening before transmitting data
-                            setTimeout(async () => {
-                                this.pauseListening();
-                                await this.transmitDataFast();
-                            }, 500);
+                        if (this.dataBuffer.length >= this.expectedLength) {
+                            this.processReceivedData();
                         }
-                        break;
-
-                    case 'receiving_data':
-                        if (tone.name.startsWith('DATA_')) {
-                            // Handle both old binary (DATA_0/DATA_1) and new hex (DATA_0-DATA_F) tones
-                            let hexValue;
-                            if (tone.name === 'DATA_0' || tone.name === 'DATA_1') {
-                                // Legacy binary mode
-                                hexValue = (tone.name === 'DATA_1' ? '1' : '0');
-                            } else if (tone.hexValue !== undefined) {
-                                // New hex mode
-                                hexValue = tone.hexValue.toString(16);
-                            } else {
-                                // Extract hex value from tone name (DATA_A, DATA_B, etc.)
-                                const hexPart = tone.name.substring(5);
-                                hexValue = hexPart.toLowerCase();
-                            }
-
-                            // Handle parallel channel reception
-                            if (this.config.PARALLEL_CHANNELS === 2) {
-                                this.handleParallelData(hexValue);
-                            } else {
-                                // Single channel mode (fallback)
-                                this.handleSingleChannelData(hexValue);
-                            }
-                        } else if (tone.name === 'DONE') {
-                            // Backup trigger if we have data
-                            if (this.dataBuffer.length > 0) {
-                                this.processReceivedData();
-                            }
-                        }
-                        break;
+                    }
                 }
             }
 
@@ -7595,6 +7551,62 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 this.state = 'waiting_peer_data';
                 this.updateStatus('👂 Listening for peer data...');
                 this.resumeListening();
+            }
+
+            async transmitDataReliable() {
+                // Prepare minimal data packet
+                const data = {
+                    u: currentUsername.substring(0, 10),
+                    a: {}
+                };
+
+                const answers = classData.users[currentUsername]?.answers || {};
+                const recent = Object.keys(answers).slice(-5); // Last 5 answers
+
+                recent.forEach(qId => {
+                    const shortId = qId.substring(qId.lastIndexOf('-') + 1);
+                    data.a[shortId] = answers[qId].value || answers[qId];
+                });
+
+                const json = JSON.stringify(data);
+                const hexData = this.stringToHex(json);
+
+                // Send with simple protocol
+                this.updateStatus('📡 Sending header...');
+
+                // Send start pattern
+                await this.playTone(3000, 100);
+                await this.playTone(3500, 100);
+                await this.playTone(4000, 100);
+
+                // Send length (4 hex digits)
+                const lengthHex = hexData.length.toString(16).padStart(4, '0');
+                for (let char of lengthHex) {
+                    const freq = 3000 + (parseInt(char, 16) * 100);
+                    await this.playTone(freq, 50);
+                    await this.delay(25);
+                }
+
+                // Send data
+                for (let i = 0; i < hexData.length; i++) {
+                    const hexChar = parseInt(hexData[i], 16);
+                    const freq = 3000 + (hexChar * 100);
+                    await this.playTone(freq, 50);
+                    await this.delay(25);
+
+                    if (i % 16 === 0) {
+                        this.updateStatus(`📤 Sending: ${Math.round(i * 100 / hexData.length)}%`);
+                    }
+                }
+
+                // Send end pattern
+                await this.playTone(4000, 100);
+                await this.playTone(3500, 100);
+                await this.playTone(3000, 100);
+
+                this.updateStatus('✅ Transmission complete!');
+
+                setTimeout(() => this.complete(), 2000);
             }
 
             async transmitDataFast() {
@@ -8241,6 +8253,65 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 document.body.appendChild(modal);
             }
 
+            showSenderUI() {
+                const modal = document.createElement('div');
+                modal.id = 'audio-protocol';
+                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 3000; padding: 20px;';
+
+                modal.innerHTML = `
+                    <div style="max-width: 400px; margin: 50px auto; text-align: center;">
+                        <h2>📤 Sending Data</h2>
+                        <div style="font-size: 60px; margin: 20px;">🔊</div>
+
+                        <div id="protocol-status" style="padding: 20px; background: #e8f5e9; border-radius: 8px; margin: 20px 0;">
+                            Preparing to send...
+                        </div>
+
+                        <div style="text-align: left; padding: 10px; background: #f0f0f0; border-radius: 5px;">
+                            <strong>Instructions:</strong><br>
+                            1. Make sure receiver clicked "Receive Data"<br>
+                            2. Keep volume at 75% or higher<br>
+                            3. Hold devices 1-2 feet apart<br>
+                            4. Wait for completion message
+                        </div>
+
+                        <button onclick="audioProtocol.cancel()" class="submit-button" style="background: #f44336; margin-top: 20px;">
+                            Cancel
+                        </button>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+            }
+
+            showReceiverUI() {
+                const modal = document.createElement('div');
+                modal.id = 'audio-protocol';
+                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 3000; padding: 20px;';
+
+                modal.innerHTML = `
+                    <div style="max-width: 400px; margin: 50px auto; text-align: center;">
+                        <h2>📥 Receiving Data</h2>
+                        <div style="font-size: 60px; margin: 20px;">👂</div>
+
+                        <div id="protocol-status" style="padding: 20px; background: #e3f2fd; border-radius: 8px; margin: 20px 0;">
+                            Listening for sender...
+                        </div>
+
+                        <div style="background: #e0e0e0; height: 10px; border-radius: 5px; margin: 20px 0;">
+                            <div id="audio-level" style="height: 100%; width: 0%; background: #2196F3; border-radius: 5px; transition: width 0.1s;"></div>
+                        </div>
+                        <small>Audio Level Indicator</small>
+
+                        <button onclick="audioProtocol.cancel()" class="submit-button" style="background: #f44336; margin-top: 20px;">
+                            Cancel
+                        </button>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+            }
+
             updateStatus(message) {
                 const status = document.getElementById('protocol-status');
                 if (status) {
@@ -8556,30 +8627,25 @@ if (chartInstances[`dotplot-${questionId}`]) {
             modal.innerHTML = `
                 <div style="background: white; padding: 30px; border-radius: 10px; max-width: 350px; width: 90%; text-align: center;">
                     <h2>🔊 Audio Transfer</h2>
-                    <p>Transfer data using sound waves!</p>
+                    <p>Choose your role:</p>
 
-                    <button onclick="audioProtocol.startHandshake(); this.closest('[style*=fixed]').remove();"
+                    <button onclick="audioProtocol.startAsSender(); this.closest('[style*=fixed]').remove();"
                             class="sync-button" style="width: 100%; margin-bottom: 10px; background: #4CAF50;">
-                        📡 Start Transfer (Desktop)
+                        📤 Send Data
+                        <div style="font-size: 12px; opacity: 0.8;">I will transmit my answers</div>
                     </button>
 
-                    <button onclick="audioProtocol.respondToHandshake(); this.closest('[style*=fixed]').remove();"
+                    <button onclick="audioProtocol.startAsReceiver(); this.closest('[style*=fixed]').remove();"
                             class="sync-button" style="width: 100%; margin-bottom: 10px; background: #2196F3;">
-                        🎤 Receive (Phone)
-                    </button>
-
-                    <button onclick="audioProtocol.startReliableTransfer(); this.closest('[style*=fixed]').remove();"
-                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #FF9800;">
-                        🔄 Reliable Transfer (ACK Protocol)
-                    </button>
-
-                    <button onclick="audioProtocol.receiveWithAcks(); this.closest('[style*=fixed]').remove();"
-                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #9C27B0;">
-                        📥 Receive Reliable (ACK Protocol)
+                        📥 Receive Data
+                        <div style="font-size: 12px; opacity: 0.8;">I will listen for answers</div>
                     </button>
 
                     <div style="padding: 10px; background: #fff3e0; border-radius: 5px; margin: 10px 0; font-size: 12px;">
-                        ⚠️ Keep devices close and volume up!
+                        ⚠️ Tips:<br>
+                        • Keep devices 1-2 feet apart<br>
+                        • Volume at 75% or higher<br>
+                        • Quiet environment works best
                     </div>
 
                     <button onclick="this.closest('[style*=fixed]').remove()"
