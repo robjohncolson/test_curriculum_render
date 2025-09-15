@@ -9605,58 +9605,71 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 return { expectedCount: count };
             }
 
-            // Fix the data chunk processing - the issue is likely here:
+            // Replace the entire processScannedQR method with this debugged version:
             processScannedQR(data) {
                 try {
                     const parsed = JSON.parse(data);
 
-                    // Handle initial handshake
+                    // INIT: First QR from student
                     if (parsed.type === 'INIT') {
+                        // Reset everything for new student
                         this.currentStudent = parsed.user;
+                        this.receivedChunks = 0;
+                        this.expectedChunks = 0;
+
                         const syncCode = this.generateSyncCode(parsed.user);
 
-                        // Make the code VERY prominent
                         document.getElementById('sync-code-display').style.display = 'block';
                         document.getElementById('sync-code-display').textContent = syncCode;
 
                         document.getElementById('sync-status').innerHTML = `
                             <strong>Student: ${parsed.user}</strong><br>
-                            Tell them the code above ☝️
+                            Tell them: <span style="font-size: 20px; color: #ff9800;">${syncCode}</span>
                         `;
                         return;
                     }
 
-                    // Handle chunk count - THIS IS IMPORTANT
+                    // CHUNKS: Tells us how many QRs to expect
                     if (parsed.type === 'CHUNKS') {
                         this.expectedChunks = parsed.count;
                         this.receivedChunks = 0;
-                        this.currentStudent = parsed.user;
+                        this.currentStudent = parsed.user || this.currentStudent;
 
-                        // Hide the sync code
+                        // Hide code, show counter
                         document.getElementById('sync-code-display').style.display = 'none';
 
                         document.getElementById('sync-status').innerHTML = `
-                            <div style="font-size: 24px; color: #2196F3;">
-                                Expecting ${parsed.count} QR codes from ${parsed.user}
+                            <div style="padding: 20px; background: #fff3e0; border-radius: 8px;">
+                                <div>Receiving from: <strong>${this.currentStudent}</strong></div>
+                                <div style="font-size: 48px; color: #ff9800; margin: 10px 0;">
+                                    <span id="chunk-counter">0</span> / ${this.expectedChunks}
+                                </div>
+                                <div>Scan the QR codes as they appear</div>
                             </div>
-                            <div style="font-size: 48px; margin: 20px 0;">
-                                <span id="chunk-counter">0</span> / ${parsed.count}
-                            </div>
-                            <div>Point camera at next QR</div>
                         `;
                         return;
                     }
 
-                    // Handle data chunks
-                    if (parsed.t === 'D' || parsed.type === 'DATA') {
+                    // DATA: Actual answer data
+                    if (parsed.t === 'D') {
+                        // Make sure we have expected chunks set
+                        if (!this.expectedChunks || this.expectedChunks === 0) {
+                            // We missed the CHUNKS message somehow
+                            this.expectedChunks = 999; // Set high number
+                        }
 
+                        this.receivedChunks = (this.receivedChunks || 0) + 1;
+
+                        // Get student name from data if available
                         if (parsed.u) {
                             this.currentStudent = parsed.u;
                         }
 
-                        this.receivedChunks++;
+                        // Process the actual data
+                        if (!this.currentStudent) {
+                            this.currentStudent = 'unknown_student';
+                        }
 
-                        // Process the data
                         if (!classData.users[this.currentStudent]) {
                             classData.users[this.currentStudent] = {
                                 answers: {},
@@ -9666,73 +9679,75 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             };
                         }
 
-                        const dataArray = parsed.d || parsed.data;
-                        if (Array.isArray(dataArray)) {
-                            dataArray.forEach(item => {
-                                let fullQId = null;
-                                for (let q of this.curriculum) {
-                                    if (q.id.includes(item.q) || q.id.endsWith(item.q)) {
-                                        fullQId = q.id;
-                                        break;
-                                    }
-                                }
-                                if (!fullQId) {
-                                    fullQId = `question-${item.q}`;
-                                }
-                                classData.users[this.currentStudent].answers[fullQId] = item.a;
-                                classData.users[this.currentStudent].timestamps[fullQId] = item.t * 1000;
+                        // Save the answers
+                        if (parsed.d && Array.isArray(parsed.d)) {
+                            parsed.d.forEach(item => {
+                                // Simple approach - just save with the short ID
+                                const qId = `q-${item.q}`;
+                                classData.users[this.currentStudent].answers[qId] = item.a;
+                                classData.users[this.currentStudent].timestamps[qId] = (item.t || Date.now()/1000) * 1000;
                             });
+                            saveClassData();
                         }
 
-                        saveClassData();
-
-                        // Update counter
-                        if (document.getElementById('chunk-counter')) {
-                            document.getElementById('chunk-counter').textContent = this.receivedChunks;
+                        // Update display
+                        const counter = document.getElementById('chunk-counter');
+                        if (counter) {
+                            counter.textContent = this.receivedChunks;
                         }
 
-                        // CHECK IF WE'RE DONE
-                        if (this.receivedChunks >= this.expectedChunks) {
-                            // AUTO-GENERATE FINAL CODE!
-                            const finalCode = 'DONE' + Math.floor(Math.random() * 10);
+                        // Check if we're done
+                        if (this.expectedChunks !== 999 && this.receivedChunks >= this.expectedChunks) {
+                            // WE'RE DONE - Generate final code
+                            const finalCode = this.generateFinalCode();
 
+                            // Show the final code BIG
                             document.getElementById('sync-code-display').style.display = 'block';
                             document.getElementById('sync-code-display').textContent = finalCode;
                             document.getElementById('sync-code-display').style.background = '#4CAF50';
                             document.getElementById('sync-code-display').style.color = 'white';
 
                             document.getElementById('sync-status').innerHTML = `
-                                <div style="font-size: 24px; color: #4CAF50;">
-                                    ✅ All ${this.expectedChunks} QRs received!
-                                </div>
-                                <div style="margin-top: 20px;">
-                                    Give student the code above ☝️
+                                <div style="padding: 20px; background: #c8e6c9; border-radius: 8px;">
+                                    <div style="font-size: 24px;">✅ Complete!</div>
+                                    <div>All ${this.expectedChunks} QRs received</div>
+                                    <div style="margin-top: 10px;">Give student code above ☝️</div>
                                 </div>
                             `;
                         } else {
-                            // More to go
+                            // More QRs to go
                             document.getElementById('sync-status').innerHTML = `
-                                <div style="font-size: 48px; margin: 20px 0;">
-                                    <span id="chunk-counter">${this.receivedChunks}</span> / ${this.expectedChunks}
+                                <div style="padding: 20px; background: #e3f2fd; border-radius: 8px;">
+                                    <div>From: <strong>${this.currentStudent}</strong></div>
+                                    <div style="font-size: 48px; color: #2196F3; margin: 10px 0;">
+                                        <span id="chunk-counter">${this.receivedChunks}</span> / ${this.expectedChunks === 999 ? '?' : this.expectedChunks}
+                                    </div>
+                                    <div>Tell student: <strong>SPACEBAR</strong> for next</div>
                                 </div>
-                                <div>Tell student: <strong>PRESS SPACEBAR</strong></div>
                             `;
-                        }
 
-                        // Flash green
-                        document.getElementById('sync-status').style.background = '#c8e6c9';
-                        setTimeout(() => {
-                            document.getElementById('sync-status').style.background = '#e3f2fd';
-                        }, 500);
+                            // Add manual complete button if we don't know the total
+                            if (this.expectedChunks === 999) {
+                                document.getElementById('sync-status').innerHTML += `
+                                    <button onclick="qrKeyboard.manualComplete()"
+                                            style="margin-top: 10px; padding: 10px 20px;
+                                                   background: #4CAF50; color: white;
+                                                   border: none; border-radius: 5px;">
+                                        That's All - Generate Final Code
+                                    </button>
+                                `;
+                            }
+                        }
 
                         return;
                     }
 
-                    // Handle final confirmation
+                    // CONFIRM: Final confirmation from student
                     if (parsed.type === 'CONFIRM') {
                         document.getElementById('sync-status').innerHTML = `
-                            <div style="font-size: 24px; color: #4CAF50;">
-                                ✅ ${this.currentStudent} synced successfully!
+                            <div style="padding: 20px; background: #4CAF50; color: white; border-radius: 8px;">
+                                <div style="font-size: 24px;">✅ Success!</div>
+                                <div>${this.currentStudent} synced</div>
                             </div>
                         `;
                         setTimeout(() => this.resetForNext(), 3000);
@@ -9740,21 +9755,34 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     }
 
                 } catch(error) {
-                    document.getElementById('sync-status').innerHTML = `
-                        <div style="color: red;">
-                            ❌ Scan Error<br>
-                            <small>Try again</small>
-                        </div>
-                    `;
-                    setTimeout(() => {
-                        document.getElementById('sync-status').innerHTML = '📷 Ready to scan';
-                    }, 2000);
+                    console.error('QR scan error:', error);
+                    // Don't show error for every scan attempt
                 }
             }
 
+            // Make sure generateFinalCode exists and is simple:
             generateFinalCode() {
-                // Simple 5-char confirmation code
-                return 'DONE' + Math.floor(Math.random() * 10);
+                // Simple 5-character code
+                const num = Math.floor(Math.random() * 10000);
+                return 'OK' + num.toString().padStart(3, '0');
+            }
+
+            // Add manual complete method
+            manualComplete() {
+                const finalCode = this.generateFinalCode();
+
+                document.getElementById('sync-code-display').style.display = 'block';
+                document.getElementById('sync-code-display').textContent = finalCode;
+                document.getElementById('sync-code-display').style.background = '#4CAF50';
+                document.getElementById('sync-code-display').style.color = 'white';
+
+                document.getElementById('sync-status').innerHTML = `
+                    <div style="padding: 20px; background: #c8e6c9; border-radius: 8px;">
+                        <div style="font-size: 24px;">✅ Manual Complete</div>
+                        <div>${this.receivedChunks} QRs received</div>
+                        <div style="margin-top: 10px;">Give student code above ☝️</div>
+                    </div>
+                `;
             }
 
             // Also fix the student's final code verification:
