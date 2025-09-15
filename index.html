@@ -9306,10 +9306,22 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 // Prepare chunks
                 this.prepareChunks(toSend);
 
-                // SKIP THE CHUNKS QR - go straight to first data QR
+                // SHOW THE CHUNKS QR - DON'T SKIP IT!
                 if (this.chunks.length > 0) {
+                    // Create chunks info packet
+                    const chunksInfo = {
+                        type: 'CHUNKS',
+                        user: currentUsername,
+                        count: this.chunks.length,
+                        timestamp: Date.now()
+                    };
+
+                    // Show the chunks QR first
+                    this.showStudentQR(chunksInfo, 'chunks');
+
+                    // After teacher scans chunks QR, they'll press button
+                    // Then we move to data QRs
                     this.currentChunk = 0;
-                    this.showStudentQR(null, 'data');
                 } else {
                     alert('No new data to send!');
                     this.cancelStudentSync();
@@ -9374,7 +9386,19 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 let instruction = '';
                 let qrData = data;
 
-                if (stage === 'data') {
+                if (stage === 'chunks') {
+                    instruction = `Show this to teacher - tells them to expect ${data.count} QR codes`;
+                    qrData = data;
+
+                    // After showing chunks QR, wait for spacebar to move to data
+                    document.onkeydown = (e) => {
+                        if (e.code === 'Space') {
+                            e.preventDefault();
+                            this.currentChunk = 0;
+                            this.showStudentQR(null, 'data');
+                        }
+                    };
+                } else if (stage === 'data') {
                     if (this.chunks && this.currentChunk < this.chunks.length) {
                         instruction = `QR ${this.currentChunk + 1} of ${this.chunks.length}. Teacher scans, then press SPACE.`;
 
@@ -9628,6 +9652,26 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         return;
                     }
 
+                    // CHUNKS: Student informing how many data QRs to expect
+                    if (parsed.type === 'CHUNKS') {
+                        this.expectedChunks = parsed.count;
+                        this.receivedChunks = 0;
+
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="padding: 20px; background: #fff3e0; border-radius: 8px;">
+                                <div>Expecting ${parsed.count} data QRs from ${parsed.user}</div>
+                                <button onclick="qrKeyboard.startReceivingData()"
+                                        style="margin-top: 15px; padding: 15px 30px;
+                                               background: #4CAF50; color: white;
+                                               border: none; border-radius: 8px;">
+                                    Ready to Receive Data
+                                </button>
+                            </div>
+                        `;
+
+                        return;
+                    }
+
                     // DATA: Actual answer data
                     if (parsed.t === 'D') {
                         // PREVENT DUPLICATE SCANS
@@ -9685,7 +9729,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         }
 
                         // Check if done
-                        if (this.receivedChunks >= 5) { // Assuming 5 total for now
+                        if (this.receivedChunks >= this.expectedChunks) {
                             // Generate final code
                             const finalCode = this.generateFinalCode();
 
