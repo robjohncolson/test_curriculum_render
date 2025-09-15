@@ -9549,57 +9549,185 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 return { expectedCount: count };
             }
 
-            // Teacher: Process scanned QR
-            // Update teacher's processing to handle compressed format
             processScannedQR(data) {
-                const parsed = JSON.parse(data);
+                try {
+                    const parsed = JSON.parse(data);
 
-                // Handle compressed data format
-                if (parsed.t === 'D') {
-                    // It's a compressed data chunk
-                    this.receivedChunks++;
+                    // Handle initial handshake
+                    if (parsed.type === 'INIT') {
+                        this.currentStudent = parsed.user;
+                        const syncCode = this.generateSyncCode(parsed.user);
 
-                    // Decompress and merge
-                    parsed.d.forEach(item => {
-                        const fullQId = this.findFullQuestionId(item.q);
-                        if (fullQId) {
-                            if (!classData.users[this.currentStudent]) {
-                                classData.users[this.currentStudent] = {
-                                    answers: {},
-                                    reasons: {},
-                                    timestamps: {},
-                                    attempts: {}
-                                };
-                            }
-                            classData.users[this.currentStudent].answers[fullQId] = item.a;
-                            classData.users[this.currentStudent].timestamps[fullQId] = item.t * 1000; // Convert back to ms
-                        }
-                    });
-
-                    saveClassData();
-
-                    document.getElementById('sync-status').textContent =
-                        `Received ${this.receivedChunks}/${this.expectedChunks}. Tell student to press SPACE.`;
-
-                    if (this.receivedChunks === this.expectedChunks) {
-                        const finalCode = this.generateFinalCode();
                         document.getElementById('sync-code-display').style.display = 'block';
-                        document.getElementById('sync-code-display').textContent = finalCode;
-                        document.getElementById('sync-status').textContent =
-                            `Complete! Give student code: ${finalCode}`;
-                    }
-                    return;
-                }
+                        document.getElementById('sync-code-display').textContent = syncCode;
+                        document.getElementById('sync-code-display').style.cssText =
+                            'font-size: 48px; letter-spacing: 10px; background: yellow; padding: 20px; margin: 20px auto; border-radius: 8px;';
 
-                // Handle other message types (INIT, CHUNKS, etc.)
-                switch(parsed.type) {
-                    // ... rest of the switch cases remain the same
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="padding: 20px; background: #e3f2fd; border-radius: 8px;">
+                                <h3>Student: ${parsed.user}</h3>
+                                <p>They have ${parsed.count} answers total</p>
+                                <p style="font-size: 20px; margin-top: 10px;">👆 Tell them this code: <strong>${syncCode}</strong></p>
+                            </div>
+                        `;
+                        return;
+                    }
+
+                    // Handle chunk count announcement
+                    if (parsed.type === 'CHUNKS') {
+                        this.expectedChunks = parsed.count;
+                        this.receivedChunks = 0;
+
+                        document.getElementById('sync-code-display').style.display = 'none';
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="padding: 20px; background: #fff3e0; border-radius: 8px;">
+                                <h3>Ready to receive ${parsed.count} QR codes</h3>
+                                <div style="font-size: 36px; margin: 20px 0;">
+                                    <span id="chunk-counter">0</span> / ${parsed.count}
+                                </div>
+                                <p>Point camera at student's screen</p>
+                            </div>
+                        `;
+                        return;
+                    }
+
+                    // Handle compressed data chunks
+                    if (parsed.t === 'D') {
+                        this.receivedChunks++;
+
+                        // Process the data
+                        if (!classData.users[this.currentStudent]) {
+                            classData.users[this.currentStudent] = {
+                                answers: {},
+                                reasons: {},
+                                timestamps: {},
+                                attempts: {}
+                            };
+                        }
+
+                        parsed.d.forEach(item => {
+                            const fullQId = this.findFullQuestionId(item.q);
+                            if (fullQId) {
+                                classData.users[this.currentStudent].answers[fullQId] = item.a;
+                                classData.users[this.currentStudent].timestamps[fullQId] = item.t * 1000;
+                            }
+                        });
+
+                        saveClassData();
+
+                        // Update counter visually
+                        document.getElementById('chunk-counter').textContent = this.receivedChunks;
+
+                        // Flash green to show successful scan
+                        document.getElementById('sync-status').style.background = '#c8e6c9';
+                        setTimeout(() => {
+                            document.getElementById('sync-status').style.background = '';
+                        }, 300);
+
+                        if (this.receivedChunks < this.expectedChunks) {
+                            // Still more to go
+                            document.getElementById('sync-status').innerHTML = `
+                                <div style="padding: 20px; background: #e8f5e9; border-radius: 8px;">
+                                    <h3>✅ QR ${parsed.n + 1} Received!</h3>
+                                    <div style="font-size: 36px; margin: 20px 0;">
+                                        <span id="chunk-counter">${this.receivedChunks}</span> / ${this.expectedChunks}
+                                    </div>
+                                    <p style="font-size: 20px;">Tell student to press SPACEBAR</p>
+                                </div>
+                            `;
+                        } else {
+                            // All chunks received - generate final code
+                            const finalCode = this.generateFinalCode();
+                            this.finalCode = finalCode; // Store it
+
+                            document.getElementById('sync-code-display').style.display = 'block';
+                            document.getElementById('sync-code-display').textContent = finalCode;
+                            document.getElementById('sync-code-display').style.cssText =
+                                'font-size: 48px; letter-spacing: 10px; background: #4CAF50; color: white; padding: 20px; margin: 20px auto; border-radius: 8px;';
+
+                            document.getElementById('sync-status').innerHTML = `
+                                <div style="padding: 20px; background: #c8e6c9; border-radius: 8px;">
+                                    <h3>🎉 All ${this.expectedChunks} QR codes received!</h3>
+                                    <p style="font-size: 20px;">Give student this final code:</p>
+                                    <p style="font-size: 36px; font-weight: bold;">${finalCode}</p>
+                                </div>
+                            `;
+                        }
+                        return;
+                    }
+
+                    // Handle final confirmation
+                    if (parsed.type === 'CONFIRM') {
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="padding: 20px; background: #4CAF50; color: white; border-radius: 8px;">
+                                <h3>✅ ${this.currentStudent} synced successfully!</h3>
+                                <p>All data saved.</p>
+                            </div>
+                        `;
+
+                        // Auto-reset after 3 seconds
+                        setTimeout(() => this.resetForNext(), 3000);
+                        return;
+                    }
+
+                } catch(error) {
+                    console.error('Error processing QR:', error);
+                    document.getElementById('sync-status').innerHTML = `
+                        <div style="padding: 20px; background: #ffcdd2; border-radius: 8px;">
+                            <p>Error scanning QR. Try again.</p>
+                        </div>
+                    `;
                 }
             }
 
             generateFinalCode() {
                 // Simple 5-char confirmation code
                 return 'DONE' + Math.floor(Math.random() * 10);
+            }
+
+            // Also fix the student's final code verification:
+            verifyFinalState() {
+                const code = document.getElementById('final-code').value.toUpperCase();
+
+                if (code.startsWith('DONE')) {
+                    // Success! Send confirmation
+                    const confirmation = {
+                        type: 'CONFIRM',
+                        user: currentUsername,
+                        timestamp: Date.now()
+                    };
+
+                    document.getElementById('qr-display').innerHTML = `
+                        <div style="position: fixed; inset: 0; background: white; z-index: 9999;
+                                    display: flex; align-items: center; justify-content: center;">
+                            <div style="text-align: center;">
+                                <h2>✅ Sync Complete!</h2>
+                                <p>Show this final QR to teacher:</p>
+                                <div id="final-qr" style="margin: 20px auto;"></div>
+                                <button onclick="qrKeyboard.finishSync()"
+                                        style="margin-top: 20px; padding: 10px 30px; background: #4CAF50;
+                                               color: white; border: none; border-radius: 4px; font-size: 18px;">
+                                    Done
+                                </button>
+                            </div>
+                        </div>
+                    `;
+
+                    new QRCode(document.getElementById('final-qr'), {
+                        text: JSON.stringify(confirmation),
+                        width: 200,
+                        height: 200
+                    });
+                } else {
+                    alert('Invalid code. Please check with teacher.');
+                }
+            }
+
+            // Add finish sync method
+            finishSync() {
+                document.getElementById('qr-display')?.remove();
+                document.onkeydown = null;
+                loadProgress(); // Refresh the UI to show any new data
             }
 
             // Add to QRKeyboardSync class
