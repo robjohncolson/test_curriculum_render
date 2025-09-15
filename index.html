@@ -9466,22 +9466,47 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 `;
             }
 
-            // Teacher side: Start receiving
+            // Replace startTeacherReceive with this cleaner version:
             startTeacherReceive() {
                 const modal = document.createElement('div');
                 modal.id = 'teacher-receive';
                 modal.innerHTML = `
                     <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-                                background: white; z-index: 9999; padding: 20px;">
-                        <h2>Teacher Sync Mode</h2>
-                        <div id="scanner-area" style="width: 100%; max-width: 400px; margin: 0 auto;"></div>
-                        <div id="sync-status" style="text-align: center; margin-top: 20px;">
-                            Ready to scan initial QR
+                                background: white; z-index: 9999; overflow-y: auto;">
+
+                        <!-- Camera view at top -->
+                        <div style="background: #f5f5f5; padding: 10px;">
+                            <div id="scanner-area" style="width: 100%; max-width: 300px; height: 300px; margin: 0 auto;"></div>
                         </div>
-                        <div id="sync-code-display" style="display: none; text-align: center; margin: 20px;
-                                                   font-size: 48px; letter-spacing: 10px;
-                                                   background: yellow; padding: 20px;"></div>
-                        <button onclick="qrKeyboard.cancelTeacherSync()">Cancel</button>
+
+                        <!-- Status message -->
+                        <div id="sync-status" style="padding: 15px; text-align: center; background: #e3f2fd; margin: 10px;">
+                            📷 Ready to scan student's first QR
+                        </div>
+
+                        <!-- Code display - PROMINENT when shown -->
+                        <div id="sync-code-display"
+                             style="display: none;
+                                    text-align: center;
+                                    margin: 20px;
+                                    padding: 30px;
+                                    background: #ffeb3b;
+                                    border: 3px solid #000;
+                                    border-radius: 10px;
+                                    font-size: 60px;
+                                    letter-spacing: 15px;
+                                    font-family: monospace;
+                                    font-weight: bold;">
+                        </div>
+
+                        <!-- Cancel button at bottom -->
+                        <div style="position: fixed; bottom: 20px; left: 20px; right: 20px;">
+                            <button onclick="qrKeyboard.cancelTeacherSync()"
+                                    style="width: 100%; padding: 15px; background: #f44336; color: white;
+                                           border: none; border-radius: 8px; font-size: 18px;">
+                                Cancel
+                            </button>
+                        </div>
                     </div>
                 `;
                 document.body.appendChild(modal);
@@ -9550,55 +9575,45 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 return { expectedCount: count };
             }
 
+            // Fix the data chunk processing - the issue is likely here:
             processScannedQR(data) {
                 try {
-                    console.log('Raw QR data received:', data); // Debug log
                     const parsed = JSON.parse(data);
-                    console.log('Parsed QR data:', parsed); // Debug log
 
                     // Handle initial handshake
                     if (parsed.type === 'INIT') {
-                        console.log('Processing INIT from:', parsed.user);
                         this.currentStudent = parsed.user;
                         const syncCode = this.generateSyncCode(parsed.user);
 
+                        // Make the code VERY prominent
                         document.getElementById('sync-code-display').style.display = 'block';
                         document.getElementById('sync-code-display').textContent = syncCode;
-                        document.getElementById('sync-code-display').style.cssText =
-                            'font-size: 48px; letter-spacing: 10px; background: yellow; padding: 20px; margin: 20px auto; border-radius: 8px;';
 
                         document.getElementById('sync-status').innerHTML = `
-                            <div style="padding: 20px; background: #e3f2fd; border-radius: 8px;">
-                                <h3>Student: ${parsed.user}</h3>
-                                <p>They have ${parsed.count} answers total</p>
-                                <p style="font-size: 20px; margin-top: 10px;">👆 Tell them this code: <strong>${syncCode}</strong></p>
-                            </div>
+                            <strong>Student: ${parsed.user}</strong><br>
+                            Tell them the code above ☝️
                         `;
                         return;
                     }
 
-                    // Handle compressed data chunks
-                    if (parsed.t === 'D') {
-                        console.log('Processing data chunk:', parsed.n);
+                    // Handle compressed data chunks - FIX THE FORMAT CHECK
+                    if (parsed.t === 'D' || parsed.type === 'DATA') {  // Check both formats
 
-                        // Initialize if this is the first chunk
-                        if (this.receivedChunks === undefined || this.receivedChunks === 0) {
-                            // If we didn't get a CHUNKS message, infer from the data
-                            if (!this.expectedChunks) {
-                                // We'll have to estimate or ask for it
-                                this.expectedChunks = 999; // Set high and update as we go
-                            }
+                        // Get student username from the data
+                        if (parsed.u) {
+                            this.currentStudent = parsed.u;
+                        }
+
+                        // Initialize counts if needed
+                        if (!this.receivedChunks) {
                             this.receivedChunks = 0;
+                            this.expectedChunks = this.expectedChunks || 999;
                         }
 
                         this.receivedChunks++;
 
-                        // Make sure we have the current student
-                        if (!this.currentStudent) {
-                            console.error('No current student set!');
-                            // Try to get from the original INIT or set a default
-                            this.currentStudent = 'unknown_student';
-                        }
+                        // Hide code display during data transfer
+                        document.getElementById('sync-code-display').style.display = 'none';
 
                         // Process the data
                         if (!classData.users[this.currentStudent]) {
@@ -9610,60 +9625,78 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             };
                         }
 
-                        parsed.d.forEach(item => {
-                            console.log('Processing item:', item);
-                            const fullQId = this.findFullQuestionId(item.q);
-                            if (fullQId) {
+                        // Handle the data array
+                        const dataArray = parsed.d || parsed.data;
+                        if (Array.isArray(dataArray)) {
+                            dataArray.forEach(item => {
+                                // Try multiple ID resolution strategies
+                                let fullQId = null;
+
+                                // Strategy 1: Look for exact match in curriculum
+                                for (let q of this.curriculum) {
+                                    if (q.id.includes(item.q) || q.id.endsWith(item.q)) {
+                                        fullQId = q.id;
+                                        break;
+                                    }
+                                }
+
+                                // Strategy 2: If not found, use as-is with prefix
+                                if (!fullQId) {
+                                    fullQId = `question-${item.q}`;
+                                }
+
                                 classData.users[this.currentStudent].answers[fullQId] = item.a;
                                 classData.users[this.currentStudent].timestamps[fullQId] = item.t * 1000;
-                                console.log(`Saved answer for ${fullQId}: ${item.a}`);
-                            } else {
-                                console.warn(`Could not find full ID for: ${item.q}`);
-                            }
-                        });
+                            });
+                        }
 
                         saveClassData();
 
-                        // Update display
-                        if (document.getElementById('chunk-counter')) {
-                            document.getElementById('chunk-counter').textContent = this.receivedChunks;
-                        } else {
-                            // Create the display if it doesn't exist
-                            document.getElementById('sync-status').innerHTML = `
-                                <div style="padding: 20px; background: #e8f5e9; border-radius: 8px;">
-                                    <h3>✅ Receiving QR Codes</h3>
-                                    <div style="font-size: 36px; margin: 20px 0;">
-                                        <span id="chunk-counter">${this.receivedChunks}</span> received
-                                    </div>
-                                    <p style="font-size: 20px;">Tell student to press SPACEBAR for next</p>
+                        // Update status with clear count
+                        let buttonHtml = '';
+                        if (this.receivedChunks === 1) {
+                            buttonHtml = `
+                                <div style="margin-top: 20px;">
+                                    <button onclick="finishStudentSync()"
+                                            style="padding: 10px 20px; background: #2196F3; color: white;
+                                                   border: none; border-radius: 5px; font-size: 16px;">
+                                        Generate Final Code
+                                    </button>
                                 </div>
                             `;
                         }
 
-                        // Flash green
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="font-size: 36px; color: #4CAF50;">
+                                ✅ ${this.receivedChunks}
+                            </div>
+                            <div>QR codes received</div>
+                            <div style="margin-top: 10px;">Tell student: <strong>PRESS SPACEBAR</strong></div>
+                            ${buttonHtml}
+                        `;
+
+                        // Flash green briefly
                         document.getElementById('sync-status').style.background = '#c8e6c9';
                         setTimeout(() => {
-                            document.getElementById('sync-status').style.background = '';
-                        }, 300);
+                            document.getElementById('sync-status').style.background = '#e3f2fd';
+                        }, 500);
 
                         return;
                     }
 
-                    // If we get here, unknown format
-                    console.warn('Unknown QR format:', parsed);
-
                 } catch(error) {
-                    console.error('Error processing QR:', error);
-                    console.error('Raw data that caused error:', data);
-
-                    // Show more helpful error message
+                    // More helpful error display
                     document.getElementById('sync-status').innerHTML = `
-                        <div style="padding: 20px; background: #ffcdd2; border-radius: 8px;">
-                            <p>Error scanning QR. Details:</p>
-                            <p style="font-size: 12px; font-family: monospace;">${error.message}</p>
-                            <p>Data length: ${data ? data.length : 0} chars</p>
+                        <div style="color: red;">
+                            ❌ Scan Error<br>
+                            <small>Try holding steady</small>
                         </div>
                     `;
+
+                    // Auto-clear error after 2 seconds
+                    setTimeout(() => {
+                        document.getElementById('sync-status').innerHTML = '📷 Ready to scan';
+                    }, 2000);
                 }
             }
 
@@ -9787,6 +9820,27 @@ if (chartInstances[`dotplot-${questionId}`]) {
         // Add buttons to UI
         window.startStudentQRKeyboard = () => qrKeyboard.startStudentSync();
         window.startTeacherQRKeyboard = () => qrKeyboard.startTeacherReceive();
+
+        // Add a button to manually finish and generate final code:
+        window.finishStudentSync = function() {
+            const finalCode = 'DONE' + Math.floor(Math.random() * 10);
+
+            document.getElementById('sync-code-display').style.display = 'block';
+            document.getElementById('sync-code-display').textContent = finalCode;
+            document.getElementById('sync-code-display').style.background = '#4CAF50';
+            document.getElementById('sync-code-display').style.color = 'white';
+
+            document.getElementById('sync-status').innerHTML = `
+                <button onclick="finishStudentSync()"
+                        style="padding: 10px 20px; background: #2196F3; color: white;
+                               border: none; border-radius: 5px; font-size: 16px;">
+                    Generate Final Code
+                </button>
+                <div style="margin-top: 10px;">
+                    Give student the code above to finish
+                </div>
+            `;
+        }
     </script>
 </body>
 </html>
