@@ -6569,34 +6569,29 @@ if (chartInstances[`dotplot-${questionId}`]) {
             constructor() {
                 this.audioContext = null;
                 this.state = 'idle';
-                this.role = null; // 'initiator' or 'responder'
+                this.role = null;
 
-                // Simple tone protocol
+                // Same tones but adjusted timing
                 this.tones = {
-                    // Handshake tones
-                    HELLO: 2000,      // Initiator says hello
-                    ACK: 2200,        // Acknowledge receipt
-                    READY: 2400,      // Ready to receive
-                    DONE: 2600,       // Transmission complete
-                    ERROR: 2800,      // Error/retry
-
-                    // Data tones
+                    HELLO: 2000,
+                    ACK: 2200,
+                    READY: 2400,
+                    DONE: 2600,
+                    ERROR: 2800,
                     DATA_0: 3000,
-                    DATA_1: 3200,
-
-                    // Control
-                    SYNC: 1800        // Sync pulse between messages
+                    DATA_1: 3200
                 };
 
-                this.timeout = null;
-                this.retryCount = 0;
+                // Adjusted timing parameters
+                this.helloInterval = 3000;  // 3 seconds between HELLOs (was 2)
+                this.listenWindowAfterTx = 1000;  // Listen for 1 second after transmitting
             }
 
             init() {
                 this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
             }
 
-            // Start as initiator (desktop usually)
+            // Modified initiator with better listening windows
             async startHandshake() {
                 if (!this.audioContext) this.init();
 
@@ -6608,22 +6603,29 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 // Start listening first
                 await this.startListening();
 
-                // Send HELLO every 2 seconds until we get ACK
-                this.sendHello();
+                // Send HELLO with listening windows
+                this.sendHelloWithListening();
             }
 
-            async sendHello() {
+            async sendHelloWithListening() {
                 if (this.state !== 'handshaking') return;
 
                 this.updateStatus('📡 Sending HELLO...');
+
+                // Pause listening while transmitting
+                this.pauseListening();
                 await this.playTone(this.tones.HELLO, 500);
 
-                // Wait for ACK
+                // CRITICAL: Resume listening and wait for response
+                this.resumeListening();
+                this.updateStatus('👂 Listening for response...');
+
+                // Give phone time to respond before next HELLO
                 this.timeout = setTimeout(() => {
                     if (this.state === 'handshaking') {
-                        this.sendHello(); // Retry
+                        this.sendHelloWithListening(); // Retry
                     }
-                }, 2000);
+                }, this.helloInterval);
             }
 
             // Responder side (phone usually)
@@ -6659,6 +6661,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 this.isListening = true;
                 this.currentStream = stream;
                 this.dataBuffer = '';
+                this.expectedLength = 0;
 
                 const listen = () => {
                     if (!this.isListening) return;
@@ -6676,23 +6679,41 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 listen();
             }
 
+            // Add visual feedback for audio detection
             detectTone(dataArray, sampleRate, bufferLength) {
-                // Check all protocol tones
+                let detectedTone = null;
+                let maxStrength = 0;
+
                 for (let [name, freq] of Object.entries(this.tones)) {
                     const bin = Math.round(freq * bufferLength * 2 / sampleRate);
+                    const strength = (dataArray[bin] + dataArray[bin-1] + dataArray[bin+1]) / 3;
 
-                    if (dataArray[bin] > 150 && dataArray[bin-1] > 100 && dataArray[bin+1] > 100) {
-                        return { name, freq };
+                    if (strength > 120 && strength > maxStrength) {
+                        maxStrength = strength;
+                        detectedTone = { name, freq, strength };
                     }
                 }
-                return null;
+
+                // Show audio level indicator
+                this.updateAudioLevel(maxStrength);
+
+                return detectedTone;
             }
 
+            updateAudioLevel(level) {
+                const indicator = document.getElementById('audio-level');
+                if (indicator) {
+                    indicator.style.width = Math.min(100, level / 2) + '%';
+                    indicator.style.background = level > 120 ? '#4CAF50' : '#ff9800';
+                }
+            }
+
+            // Modified responder to send ACK immediately
             async handleTone(tone) {
                 const now = Date.now();
 
-                // Debounce
-                if (this.lastTone === tone.name && now - this.lastToneTime < 100) return;
+                // Less aggressive debouncing
+                if (this.lastTone === tone.name && now - this.lastToneTime < 50) return;
                 this.lastTone = tone.name;
                 this.lastToneTime = now;
 
@@ -6701,30 +6722,43 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 switch (this.state) {
                     case 'listening_hello':
                         if (tone.name === 'HELLO') {
-                            clearTimeout(this.timeout);
                             this.updateStatus('📞 HELLO received! Sending ACK...');
                             this.state = 'sending_ack';
 
-                            // Stop listening briefly to send
-                            this.pauseListening();
-                            await this.delay(500);
-                            await this.playTone(this.tones.ACK, 500);
-                            await this.delay(200);
+                            // Quick pause, send ACK, then READY
+                            setTimeout(async () => {
+                                this.pauseListening();
 
-                            this.updateStatus('🎤 Ready to receive data...');
-                            await this.playTone(this.tones.READY, 500);
+                                await this.delay(200);  // Small delay
+                                await this.playTone(this.tones.ACK, 300);
+                                await this.delay(200);
+                                await this.playTone(this.tones.READY, 300);
 
-                            this.state = 'receiving_data';
-                            this.dataBuffer = '';
-                            this.resumeListening();
+                                this.state = 'receiving_data';
+                                this.dataBuffer = '';
+                                this.expectedLength = 0;
+
+                                this.updateStatus('🎤 Ready to receive data...');
+                                this.resumeListening();
+                            }, 100);  // Very quick response
                         }
                         break;
 
                     case 'handshaking':
                         if (tone.name === 'ACK') {
-                            clearTimeout(this.timeout);
+                            clearTimeout(this.timeout);  // Stop sending HELLOs
                             this.updateStatus('✅ ACK received! Waiting for READY...');
                             this.state = 'waiting_ready';
+                        } else if (tone.name === 'READY') {
+                            // Sometimes ACK and READY come together
+                            clearTimeout(this.timeout);
+                            this.updateStatus('📤 Peer ready! Sending data...');
+                            this.state = 'sending_data';
+
+                            setTimeout(async () => {
+                                this.pauseListening();
+                                await this.transmitData();
+                            }, 500);
                         }
                         break;
 
@@ -6732,27 +6766,42 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         if (tone.name === 'READY') {
                             this.updateStatus('📤 Peer ready! Sending data...');
                             this.state = 'sending_data';
-                            this.pauseListening();
-                            await this.transmitData();
+
+                            setTimeout(async () => {
+                                this.pauseListening();
+                                await this.transmitData();
+                            }, 500);
                         }
                         break;
 
                     case 'receiving_data':
-                        if (tone.name === 'DATA_0') {
-                            this.dataBuffer += '0';
-                            this.updateDataProgress();
-                        } else if (tone.name === 'DATA_1') {
-                            this.dataBuffer += '1';
-                            this.updateDataProgress();
-                        } else if (tone.name === 'DONE') {
-                            this.processReceivedData();
-                        }
-                        break;
+                        if (tone.name === 'DATA_0' || tone.name === 'DATA_1') {
+                            // First 16 bits are length
+                            if (this.expectedLength === 0) {
+                                this.dataBuffer += (tone.name === 'DATA_1' ? '1' : '0');
 
-                    case 'waiting_done_ack':
-                        if (tone.name === 'ACK') {
-                            this.updateStatus('✅ Transfer complete!');
-                            this.complete();
+                                if (this.dataBuffer.length === 16) {
+                                    this.expectedLength = parseInt(this.dataBuffer, 2);
+                                    this.dataBuffer = '';
+                                    this.updateStatus(`Expecting ${this.expectedLength} bits...`);
+                                }
+                            } else {
+                                // Actual data
+                                this.dataBuffer += (tone.name === 'DATA_1' ? '1' : '0');
+
+                                if (this.dataBuffer.length % 8 === 0) {
+                                    this.updateStatus(`Received ${this.dataBuffer.length}/${this.expectedLength} bits`);
+                                }
+
+                                if (this.dataBuffer.length >= this.expectedLength) {
+                                    this.processReceivedData();
+                                }
+                            }
+                        } else if (tone.name === 'DONE') {
+                            // Backup trigger if we have data
+                            if (this.dataBuffer.length > 0) {
+                                this.processReceivedData();
+                            }
                         }
                         break;
                 }
@@ -6869,7 +6918,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 clearTimeout(this.timeout);
             }
 
-            // UI Methods
+            // Better UI with audio level indicator
             showHandshakeUI() {
                 const modal = document.createElement('div');
                 modal.id = 'audio-protocol';
@@ -6877,7 +6926,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                 modal.innerHTML = `
                     <div style="max-width: 400px; margin: 50px auto; text-align: center;">
-                        <h2>🔊 Audio Transfer - Initiator</h2>
+                        <h2>🔊 Audio Transfer - Sending</h2>
 
                         <div style="font-size: 60px; margin: 20px;">📡</div>
 
@@ -6885,13 +6934,13 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             Initializing...
                         </div>
 
-                        <div id="data-progress" style="display: none; margin: 20px 0;">
-                            <div style="background: #e0e0e0; height: 20px; border-radius: 10px; overflow: hidden;">
-                                <div id="progress-bar" style="background: #4CAF50; height: 100%; width: 0%; transition: width 0.3s;"></div>
-                            </div>
+                        <!-- Audio level indicator -->
+                        <div style="background: #e0e0e0; height: 10px; border-radius: 5px; margin: 20px 0;">
+                            <div id="audio-level" style="height: 100%; width: 0%; background: #ff9800; border-radius: 5px; transition: width 0.1s;"></div>
                         </div>
+                        <small>Audio Level (should pulse when receiving)</small>
 
-                        <button onclick="audioProtocol.cancel()" class="submit-button" style="background: #f44336;">
+                        <button onclick="audioProtocol.cancel()" class="submit-button" style="background: #f44336; margin-top: 20px;">
                             Cancel Transfer
                         </button>
                     </div>
@@ -6907,7 +6956,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                 modal.innerHTML = `
                     <div style="max-width: 400px; margin: 50px auto; text-align: center;">
-                        <h2>🎤 Audio Transfer - Listener</h2>
+                        <h2>🎤 Audio Transfer - Receiving</h2>
 
                         <div style="font-size: 60px; margin: 20px;">👂</div>
 
@@ -6915,11 +6964,13 @@ if (chartInstances[`dotplot-${questionId}`]) {
                             Listening for connection...
                         </div>
 
-                        <div id="data-progress" style="display: none; margin: 20px 0;">
-                            <div>Bits received: <span id="bit-count">0</span></div>
+                        <!-- Audio level indicator -->
+                        <div style="background: #e0e0e0; height: 10px; border-radius: 5px; margin: 20px 0;">
+                            <div id="audio-level" style="height: 100%; width: 0%; background: #ff9800; border-radius: 5px; transition: width 0.1s;"></div>
                         </div>
+                        <small>Audio Level (should pulse when hearing tones)</small>
 
-                        <button onclick="audioProtocol.cancel()" class="submit-button" style="background: #f44336;">
+                        <button onclick="audioProtocol.cancel()" class="submit-button" style="background: #f44336; margin-top: 20px;">
                             Cancel Transfer
                         </button>
                     </div>
