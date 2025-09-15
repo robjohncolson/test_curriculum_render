@@ -7459,14 +7459,41 @@ if (chartInstances[`dotplot-${questionId}`]) {
             }
 
             async handleTone(tone) {
+                // Handle speed test acknowledgments when sender is waiting
+                if (this.role === 'sender' && this.waitingForSpeedAck) {
+                    if (Math.abs(tone.freq - this.tones.ACK) < 100) {
+                        console.log('Sender received ACK for speed test');
+                        this.speedAckReceived = true;
+                        return;
+                    } else if (Math.abs(tone.freq - this.tones.ERROR) < 100) {
+                        console.log('Sender received NACK for speed test');
+                        this.speedNackReceived = true;
+                        return;
+                    }
+                }
+
+                // Rest of receiver handling
                 if (this.role !== 'receiver') return;
+
+                // Check for speed test response if we're waiting for one
+                if (this.waitingForSpeedAck) {
+                    if (tone.name === 'ACK' || Math.abs(tone.freq - this.tones.ACK) < 100) {
+                        this.speedAckReceived = true;
+                        console.log('Speed ACK received');
+                        return;
+                    } else if (tone.name === 'ERROR' || tone.name === 'NACK' || Math.abs(tone.freq - this.tones.ERROR) < 100) {
+                        this.speedNackReceived = true;
+                        console.log('Speed NACK received');
+                        return;
+                    }
+                }
 
                 // Detect speed test marker
                 if (Math.abs(tone.freq - 2500) < 100) {
                     this.state = 'speed_test';
                     this.testBuffer = '';
                     this.testStartTime = Date.now();
-                    console.log('Speed test detected');
+                    console.log('Receiver: Speed test detected');
                     return;
                 }
 
@@ -7477,36 +7504,51 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         if (hexVal >= 0 && hexVal <= 15) {
                             this.testBuffer += hexVal.toString(16);
 
-                            // Check if we got "TEST_" pattern
-                            if (this.testBuffer.length >= 10) {
+                            // Try to decode what we have so far
+                            if (this.testBuffer.length >= 10 && this.testBuffer.length % 2 === 0) {
                                 try {
                                     const decoded = this.hexToString(this.testBuffer);
+                                    console.log('Receiver decoded:', decoded);
+
                                     if (decoded.startsWith('TEST_')) {
-                                        // Success! Send ACK
-                                        console.log('Speed test passed:', decoded);
+                                        // Success! Send ACK immediately
+                                        console.log('Receiver: Speed test passed, sending ACK');
+
+                                        // CRITICAL: Wait a moment for sender to start listening
+                                        await this.delay(200);
+
                                         this.pauseListening();
-                                        await this.playTone(this.tones.ACK, 100);
+                                        await this.playTone(this.tones.ACK, 200); // Longer ACK
+                                        await this.delay(100);
+                                        await this.playTone(this.tones.ACK, 200); // Send twice for reliability
                                         this.resumeListening();
 
                                         this.state = 'waiting_for_sender';
                                         this.updateStatus('✅ Speed test passed');
+                                        this.testBuffer = '';
+                                        return;
                                     }
                                 } catch(e) {
-                                    // Failed to decode, send ERROR
-                                    this.pauseListening();
-                                    await this.playTone(this.tones.ERROR, 100);
-                                    this.resumeListening();
-
-                                    this.state = 'waiting_for_sender';
+                                    console.log('Receiver: Failed to decode speed test');
                                 }
+                            }
 
+                            // If buffer gets too long without success, it failed
+                            if (this.testBuffer.length > 20) {
+                                console.log('Receiver: Speed test failed, sending ERROR');
+                                this.pauseListening();
+                                await this.playTone(this.tones.ERROR, 200);
+                                this.resumeListening();
+
+                                this.state = 'waiting_for_sender';
                                 this.testBuffer = '';
                             }
                         }
                     }
 
-                    // Timeout speed test after 3 seconds
-                    if (Date.now() - this.testStartTime > 3000) {
+                    // Timeout speed test
+                    if (Date.now() - this.testStartTime > 2000) {
+                        console.log('Receiver: Speed test timeout');
                         this.state = 'waiting_for_sender';
                         this.testBuffer = '';
                     }
@@ -8711,7 +8753,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 });
             }
 
-            async sendTestPattern(pattern, speed) {
+            async sendTestPatternOnly(pattern, speed) {
                 const profile = this.speedProfiles[speed];
 
                 // Send speed test header
@@ -8728,36 +8770,49 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     await this.delay(profile.interToneDelay);
                 }
 
-                // Wait for ACK/NACK
-                return await this.waitForSpeedAck(speed, 2000); // 2 second timeout
+                console.log(`Sent test pattern: ${pattern}`);
             }
 
-            async waitForSpeedAck(speed, timeout) {
+            async sendTestPattern(pattern, speed) {
+                await this.sendTestPatternOnly(pattern, speed);
+                return await this.waitForSpeedResponse(speed, 2000); // 2 second timeout
+            }
+
+            async waitForSpeedResponse(speed, timeout) {
                 return new Promise((resolve) => {
-                    let ackReceived = false;
+                    let responded = false;
                     const startTime = Date.now();
 
-                    // Temporarily override handleTone to listen for ACK
-                    const originalHandler = this.handleTone;
+                    // Set up a flag that handleTone can set
+                    this.waitingForSpeedAck = true;
+                    this.speedAckReceived = false;
+                    this.speedNackReceived = false;
 
-                    this.handleTone = (tone) => {
-                        if (tone.name === 'ACK' || Math.abs(tone.freq - this.tones.ACK) < 100) {
-                            ackReceived = true;
-                            this.handleTone = originalHandler;
+                    console.log(`Waiting ${timeout}ms for speed ${speed} response...`);
+
+                    // Check periodically for response
+                    const checkInterval = setInterval(() => {
+                        if (this.speedAckReceived) {
+                            console.log('ACK received!');
+                            clearInterval(checkInterval);
+                            this.waitingForSpeedAck = false;
+                            responded = true;
                             resolve(true);
-                        } else if (tone.name === 'ERROR' || Math.abs(tone.freq - this.tones.ERROR) < 100) {
-                            this.handleTone = originalHandler;
+                        } else if (this.speedNackReceived) {
+                            console.log('NACK received!');
+                            clearInterval(checkInterval);
+                            this.waitingForSpeedAck = false;
+                            responded = true;
                             resolve(false);
+                        } else if (Date.now() - startTime > timeout) {
+                            console.log('Timeout waiting for response');
+                            clearInterval(checkInterval);
+                            this.waitingForSpeedAck = false;
+                            if (!responded) {
+                                resolve(false);
+                            }
                         }
-                    };
-
-                    // Timeout handler
-                    setTimeout(() => {
-                        if (!ackReceived) {
-                            this.handleTone = originalHandler;
-                            resolve(false); // No response = too fast
-                        }
-                    }, timeout);
+                    }, 100); // Check every 100ms
                 });
             }
 
@@ -8929,21 +8984,30 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     const profile = this.speedProfiles[speed];
 
                     this.updateStatus(`📡 Testing ${profile.name} speed...`);
+                    console.log(`Testing speed: ${speed}`);
+
+                    // CRITICAL: Pause listening while we transmit
+                    this.pauseListening();
 
                     // Send test pattern
                     const testPattern = 'TEST_' + speed.toUpperCase();
-                    const success = await this.sendTestPattern(testPattern, speed);
+                    await this.sendTestPatternOnly(testPattern, speed);
+
+                    // CRITICAL: Resume listening and actually wait
+                    this.resumeListening();
+
+                    // Now wait for response with a proper promise
+                    const success = await this.waitForSpeedResponse(speed, 3000);
 
                     if (success) {
                         bestSpeed = speed;
                         this.speedTestResults[speed] = true;
                         this.updateStatus(`✅ ${profile.name} speed works!`);
-
-                        // Try next speed
-                        continue;
+                        console.log(`Speed ${speed} acknowledged`);
                     } else {
                         // This speed failed, use previous one
                         this.updateStatus(`❌ ${profile.name} too fast, using ${this.speedProfiles[bestSpeed].name}`);
+                        console.log(`Speed ${speed} failed or timed out`);
                         break;
                     }
                 }
