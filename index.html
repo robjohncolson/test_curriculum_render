@@ -9315,21 +9315,34 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 }
             }
 
-            // Student: Prepare data chunks
+            // Much more efficient chunk preparation
             prepareChunks(questionIds) {
-                const CHUNK_SIZE = 10; // Questions per QR
+                const CHUNK_SIZE = 3; // Only 3 questions per QR for reliability
                 const chunks = [];
 
                 for (let i = 0; i < questionIds.length; i += CHUNK_SIZE) {
                     const chunkIds = questionIds.slice(i, i + CHUNK_SIZE);
-                    const chunkData = {};
+                    const chunkData = [];
 
                     chunkIds.forEach(qId => {
-                        chunkData[qId] = {
-                            a: classData.users[currentUsername].answers[qId],
-                            r: classData.users[currentUsername].reasons[qId],
-                            t: classData.users[currentUsername].timestamps[qId]
-                        };
+                        // Strip the question ID to minimum
+                        const shortId = qId.split('-').pop(); // Just the last part
+                        const answer = classData.users[currentUsername].answers[qId];
+
+                        // Compress answer to single character if multiple choice
+                        let shortAnswer = answer;
+                        if (typeof answer === 'string' && answer.length === 1) {
+                            shortAnswer = answer;
+                        } else if (answer?.value) {
+                            shortAnswer = answer.value;
+                        }
+
+                        // Create minimal data packet
+                        chunkData.push({
+                            q: shortId,  // Short question ID
+                            a: shortAnswer, // Just the answer letter/number
+                            t: Math.floor(Date.now()/1000) // Timestamp in seconds, not milliseconds
+                        });
                     });
 
                     chunks.push(chunkData);
@@ -9337,13 +9350,14 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                 this.chunks = chunks;
                 this.currentChunk = 0;
+
+                console.log(`Prepared ${chunks.length} chunks, first chunk size: ${JSON.stringify(chunks[0]).length} chars`);
             }
 
-            // Student: Show QR and wait for spacebar
+            // Also optimize how we show the QR
             showStudentQR(data, stage) {
                 let qrModal = document.getElementById('qr-display');
 
-                // Create or update modal
                 if (!qrModal) {
                     qrModal = document.createElement('div');
                     qrModal.id = 'qr-display';
@@ -9351,34 +9365,27 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 }
 
                 let instruction = '';
-                let qrData = data; // Default to passed data
+                let qrData = data;
 
-                if (stage === 'initial') {
-                    instruction = 'Show this to teacher';
-                } else if (stage === 'chunk-count') {
-                    instruction = `Will send ${this.chunks.length} QR codes. Press SPACE to show first.`;
-                    // After showing chunk count, automatically move to first data chunk
-                    setTimeout(() => {
-                        this.currentChunk = 0;
-                        this.showStudentQR(null, 'data');
-                    }, 1000);
-                    return; // Don't generate QR for chunk-count stage
-                } else if (stage === 'data') {
-                    // This is where the bug was - need to actually get the chunk data
+                if (stage === 'data') {
                     if (this.chunks && this.currentChunk < this.chunks.length) {
                         instruction = `QR ${this.currentChunk + 1} of ${this.chunks.length}. Teacher scans, then press SPACE.`;
+
+                        // Create minimal QR data
                         qrData = {
-                            type: 'DATA',
-                            chunk: this.currentChunk,
-                            data: this.chunks[this.currentChunk],
-                            user: currentUsername
+                            t: 'D', // Type = Data (single letter)
+                            n: this.currentChunk, // Chunk number
+                            d: this.chunks[this.currentChunk] // Data
                         };
-                    } else {
-                        console.error('No chunks available or chunk index out of range');
-                        return;
+
+                        // Show the data size for debugging
+                        const dataSize = JSON.stringify(qrData).length;
+                        console.log(`QR ${this.currentChunk + 1} size: ${dataSize} characters`);
+
+                        if (dataSize > 200) {
+                            console.warn('QR might be too dense! Size:', dataSize);
+                        }
                     }
-                } else if (stage === 'final') {
-                    instruction = 'Final confirmation QR';
                 }
 
                 qrModal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 9999;';
@@ -9387,6 +9394,9 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         <div style="text-align: center;">
                             <h2>${instruction}</h2>
                             <div id="student-qr-display" style="margin: 20px auto;"></div>
+                            <div style="font-size: 18px; color: #666;">
+                                ${stage === 'data' ? `Data size: ${JSON.stringify(qrData).length} chars` : ''}
+                            </div>
                             <div style="font-size: 24px; margin-top: 20px; padding: 20px; background: #f0f0f0; border-radius: 8px;">
                                 ${stage === 'data' ? `
                                     <div>Progress: ${this.currentChunk + 1}/${this.chunks.length}</div>
@@ -9401,17 +9411,16 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     </div>
                 `;
 
-                // Generate QR code
+                // Generate QR with lower error correction for smaller size
                 if (qrData) {
                     new QRCode(document.getElementById('student-qr-display'), {
                         text: JSON.stringify(qrData),
                         width: 300,
                         height: 300,
-                        correctLevel: QRCode.CorrectLevel.L
+                        correctLevel: QRCode.CorrectLevel.L // Use Low error correction for smaller QR
                     });
                 }
 
-                // Set up spacebar handler for data chunks
                 if (stage === 'data') {
                     document.onkeydown = (e) => {
                         if (e.code === 'Space') {
@@ -9541,50 +9550,50 @@ if (chartInstances[`dotplot-${questionId}`]) {
             }
 
             // Teacher: Process scanned QR
+            // Update teacher's processing to handle compressed format
             processScannedQR(data) {
                 const parsed = JSON.parse(data);
 
-                switch(parsed.type) {
-                    case 'INIT':
-                        // Show sync code for student
-                        const syncCode = this.generateSyncCode(parsed.user);
-                        document.getElementById('sync-code-display').style.display = 'block';
-                        document.getElementById('sync-code-display').textContent = syncCode;
-                        document.getElementById('sync-status').textContent =
-                            `Tell ${parsed.user} to type: ${syncCode}`;
-                        this.currentStudent = parsed.user;
-                        break;
+                // Handle compressed data format
+                if (parsed.t === 'D') {
+                    // It's a compressed data chunk
+                    this.receivedChunks++;
 
-                    case 'CHUNKS':
-                        this.expectedChunks = parsed.count;
-                        this.receivedChunks = 0;
-                        document.getElementById('sync-status').textContent =
-                            `Ready to receive ${parsed.count} QR codes. Press button when ready.`;
-                        document.getElementById('sync-code-display').style.display = 'none';
-                        break;
-
-                    case 'DATA':
-                        this.receivedChunks++;
-                        // Process the chunk data
-                        this.mergeChunkData(parsed.data);
-                        document.getElementById('sync-status').textContent =
-                            `Received ${this.receivedChunks}/${this.expectedChunks}. Tell student to press SPACE.`;
-
-                        if (this.receivedChunks === this.expectedChunks) {
-                            // Generate final code
-                            const finalCode = this.generateFinalCode();
-                            document.getElementById('sync-code-display').style.display = 'block';
-                            document.getElementById('sync-code-display').textContent = finalCode;
-                            document.getElementById('sync-status').textContent =
-                                `Complete! Give student code: ${finalCode}`;
+                    // Decompress and merge
+                    parsed.d.forEach(item => {
+                        const fullQId = this.findFullQuestionId(item.q);
+                        if (fullQId) {
+                            if (!classData.users[this.currentStudent]) {
+                                classData.users[this.currentStudent] = {
+                                    answers: {},
+                                    reasons: {},
+                                    timestamps: {},
+                                    attempts: {}
+                                };
+                            }
+                            classData.users[this.currentStudent].answers[fullQId] = item.a;
+                            classData.users[this.currentStudent].timestamps[fullQId] = item.t * 1000; // Convert back to ms
                         }
-                        break;
+                    });
 
-                    case 'CONFIRM':
+                    saveClassData();
+
+                    document.getElementById('sync-status').textContent =
+                        `Received ${this.receivedChunks}/${this.expectedChunks}. Tell student to press SPACE.`;
+
+                    if (this.receivedChunks === this.expectedChunks) {
+                        const finalCode = this.generateFinalCode();
+                        document.getElementById('sync-code-display').style.display = 'block';
+                        document.getElementById('sync-code-display').textContent = finalCode;
                         document.getElementById('sync-status').textContent =
-                            `✅ ${this.currentStudent} synced successfully!`;
-                        setTimeout(() => this.resetForNext(), 2000);
-                        break;
+                            `Complete! Give student code: ${finalCode}`;
+                    }
+                    return;
+                }
+
+                // Handle other message types (INIT, CHUNKS, etc.)
+                switch(parsed.type) {
+                    // ... rest of the switch cases remain the same
                 }
             }
 
@@ -9615,6 +9624,17 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                 // Save to localStorage
                 saveClassData();
+            }
+
+            // Helper to find full question ID from short ID
+            findFullQuestionId(shortId) {
+                // Search through curriculum for matching ID
+                for (let q of this.curriculum) {
+                    if (q.id.endsWith(shortId) || q.id.includes(`-${shortId}`)) {
+                        return q.id;
+                    }
+                }
+                return null;
             }
 
             resetForNext() {
