@@ -6565,98 +6565,387 @@ if (chartInstances[`dotplot-${questionId}`]) {
         }
 
         // Audio Data Transfer System
-        class AudioTransfer {
+        class AudioProtocol {
             constructor() {
                 this.audioContext = null;
-                this.isTransmitting = false;
-                this.isListening = false;
-                this.receivedChunks = [];
-                this.expectedLength = 0;
+                this.state = 'idle';
+                this.role = null; // 'initiator' or 'responder'
 
-                // Use lower frequencies that work better on phone speakers
-                this.frequencies = {
-                    start: 2000,    // Start marker (lower freq)
-                    end: 2500,      // End marker
-                    data0: 3000,    // Binary 0
-                    data1: 3500     // Binary 1
+                // Simple tone protocol
+                this.tones = {
+                    // Handshake tones
+                    HELLO: 2000,      // Initiator says hello
+                    ACK: 2200,        // Acknowledge receipt
+                    READY: 2400,      // Ready to receive
+                    DONE: 2600,       // Transmission complete
+                    ERROR: 2800,      // Error/retry
+
+                    // Data tones
+                    DATA_0: 3000,
+                    DATA_1: 3200,
+
+                    // Control
+                    SYNC: 1800        // Sync pulse between messages
                 };
 
-                this.bitDuration = 100; // ms per bit
+                this.timeout = null;
+                this.retryCount = 0;
             }
 
             init() {
                 this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
             }
 
-            // Simplified transmission - send data as binary
-            async transmitData() {
+            // Start as initiator (desktop usually)
+            async startHandshake() {
                 if (!this.audioContext) this.init();
 
-                // Create minimal packet
+                this.role = 'initiator';
+                this.state = 'handshaking';
+
+                this.showHandshakeUI();
+
+                // Start listening first
+                await this.startListening();
+
+                // Send HELLO every 2 seconds until we get ACK
+                this.sendHello();
+            }
+
+            async sendHello() {
+                if (this.state !== 'handshaking') return;
+
+                this.updateStatus('📡 Sending HELLO...');
+                await this.playTone(this.tones.HELLO, 500);
+
+                // Wait for ACK
+                this.timeout = setTimeout(() => {
+                    if (this.state === 'handshaking') {
+                        this.sendHello(); // Retry
+                    }
+                }, 2000);
+            }
+
+            // Responder side (phone usually)
+            async respondToHandshake() {
+                if (!this.audioContext) this.init();
+
+                this.role = 'responder';
+                this.state = 'listening_hello';
+
+                this.showResponderUI();
+                await this.startListening();
+            }
+
+            // Unified listening system
+            async startListening() {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                });
+
+                const source = this.audioContext.createMediaStreamSource(stream);
+                const analyser = this.audioContext.createAnalyser();
+
+                analyser.fftSize = 4096;
+                source.connect(analyser);
+
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+
+                this.isListening = true;
+                this.currentStream = stream;
+                this.dataBuffer = '';
+
+                const listen = () => {
+                    if (!this.isListening) return;
+
+                    analyser.getByteFrequencyData(dataArray);
+                    const tone = this.detectTone(dataArray, analyser.context.sampleRate, bufferLength);
+
+                    if (tone) {
+                        this.handleTone(tone);
+                    }
+
+                    requestAnimationFrame(listen);
+                };
+
+                listen();
+            }
+
+            detectTone(dataArray, sampleRate, bufferLength) {
+                // Check all protocol tones
+                for (let [name, freq] of Object.entries(this.tones)) {
+                    const bin = Math.round(freq * bufferLength * 2 / sampleRate);
+
+                    if (dataArray[bin] > 150 && dataArray[bin-1] > 100 && dataArray[bin+1] > 100) {
+                        return { name, freq };
+                    }
+                }
+                return null;
+            }
+
+            async handleTone(tone) {
+                const now = Date.now();
+
+                // Debounce
+                if (this.lastTone === tone.name && now - this.lastToneTime < 100) return;
+                this.lastTone = tone.name;
+                this.lastToneTime = now;
+
+                console.log(`Detected: ${tone.name} in state ${this.state}`);
+
+                switch (this.state) {
+                    case 'listening_hello':
+                        if (tone.name === 'HELLO') {
+                            clearTimeout(this.timeout);
+                            this.updateStatus('📞 HELLO received! Sending ACK...');
+                            this.state = 'sending_ack';
+
+                            // Stop listening briefly to send
+                            this.pauseListening();
+                            await this.delay(500);
+                            await this.playTone(this.tones.ACK, 500);
+                            await this.delay(200);
+
+                            this.updateStatus('🎤 Ready to receive data...');
+                            await this.playTone(this.tones.READY, 500);
+
+                            this.state = 'receiving_data';
+                            this.dataBuffer = '';
+                            this.resumeListening();
+                        }
+                        break;
+
+                    case 'handshaking':
+                        if (tone.name === 'ACK') {
+                            clearTimeout(this.timeout);
+                            this.updateStatus('✅ ACK received! Waiting for READY...');
+                            this.state = 'waiting_ready';
+                        }
+                        break;
+
+                    case 'waiting_ready':
+                        if (tone.name === 'READY') {
+                            this.updateStatus('📤 Peer ready! Sending data...');
+                            this.state = 'sending_data';
+                            this.pauseListening();
+                            await this.transmitData();
+                        }
+                        break;
+
+                    case 'receiving_data':
+                        if (tone.name === 'DATA_0') {
+                            this.dataBuffer += '0';
+                            this.updateDataProgress();
+                        } else if (tone.name === 'DATA_1') {
+                            this.dataBuffer += '1';
+                            this.updateDataProgress();
+                        } else if (tone.name === 'DONE') {
+                            this.processReceivedData();
+                        }
+                        break;
+
+                    case 'waiting_done_ack':
+                        if (tone.name === 'ACK') {
+                            this.updateStatus('✅ Transfer complete!');
+                            this.complete();
+                        }
+                        break;
+                }
+            }
+
+            pauseListening() {
+                // Temporarily stop processing audio
+                this.isListening = false;
+            }
+
+            resumeListening() {
+                this.isListening = true;
+            }
+
+            async transmitData() {
+                // Prepare minimal data
                 const data = {
-                    u: currentUsername.substring(0, 8), // Truncate username
+                    u: currentUsername.substring(0, 10),
                     a: {}
                 };
 
-                // Just send last 2 answers to keep it super short
                 const answers = classData.users[currentUsername].answers;
-                const recent = Object.keys(answers).slice(-2);
+                const recent = Object.keys(answers).slice(-3);
                 recent.forEach(qId => {
-                    // Simplify question IDs too
-                    const shortId = qId.substring(0, 6);
+                    const shortId = qId.substring(qId.lastIndexOf('-') + 1);
                     data.a[shortId] = answers[qId].value || answers[qId];
                 });
 
                 const json = JSON.stringify(data);
                 const binary = this.stringToBinary(json);
 
-                this.showTransmitUI(binary.length);
+                // Send data length first (16 bits)
+                const lengthBits = binary.length.toString(2).padStart(16, '0');
 
-                // Send with clear markers
-                await this.playTone(this.frequencies.start, 500); // Long start tone
-                await this.delay(200);
+                await this.delay(1000); // Give receiver time to prepare
 
-                // Send length first (so receiver knows when to stop)
-                const lengthBinary = binary.length.toString(2).padStart(16, '0');
-                for (let bit of lengthBinary) {
-                    await this.playBit(bit);
+                // Send length
+                for (let bit of lengthBits) {
+                    await this.playTone(bit === '1' ? this.tones.DATA_1 : this.tones.DATA_0, 80);
+                    await this.delay(30);
                 }
 
                 await this.delay(200);
 
-                // Send actual data
+                // Send data
                 for (let i = 0; i < binary.length; i++) {
-                    await this.playBit(binary[i]);
-                    this.updateProgress(i, binary.length);
+                    const bit = binary[i];
+                    await this.playTone(bit === '1' ? this.tones.DATA_1 : this.tones.DATA_0, 80);
+                    await this.delay(30);
+
+                    if (i % 8 === 0) {
+                        this.updateStatus(`Sending: ${Math.round(i * 100 / binary.length)}%`);
+                    }
                 }
 
-                await this.delay(200);
-                await this.playTone(this.frequencies.end, 500); // Long end tone
+                await this.delay(500);
+                await this.playTone(this.tones.DONE, 500);
 
-                this.transmissionComplete();
+                this.state = 'waiting_done_ack';
+                this.resumeListening();
             }
 
-            stringToBinary(str) {
-                return str.split('').map(char =>
-                    char.charCodeAt(0).toString(2).padStart(8, '0')
-                ).join('');
-            }
+            processReceivedData() {
+                try {
+                    // First 16 bits were length
+                    const lengthBits = this.dataBuffer.substring(0, 16);
+                    const dataLength = parseInt(lengthBits, 2);
+                    const dataBits = this.dataBuffer.substring(16, 16 + dataLength);
 
-            binaryToString(binary) {
-                let str = '';
-                for (let i = 0; i < binary.length; i += 8) {
-                    const byte = binary.substr(i, 8);
-                    str += String.fromCharCode(parseInt(byte, 2));
+                    const decoded = this.binaryToString(dataBits);
+                    const data = JSON.parse(decoded);
+
+                    // Send ACK
+                    this.pauseListening();
+                    setTimeout(async () => {
+                        await this.playTone(this.tones.ACK, 500);
+                        this.updateStatus(`✅ Received data from ${data.u}!`);
+
+                        // Import the data
+                        const imported = {
+                            users: {
+                                [data.u]: {
+                                    answers: data.a,
+                                    timestamps: {},
+                                    reasons: {},
+                                    attempts: {}
+                                }
+                            }
+                        };
+
+                        mergeClassData(imported);
+                        setTimeout(() => this.complete(), 1500);
+
+                    }, 500);
+
+                } catch(err) {
+                    console.error('Data error:', err);
+                    this.updateStatus('❌ Error processing data');
+                    this.playTone(this.tones.ERROR, 500);
                 }
-                return str;
             }
 
-            async playBit(bit) {
-                const freq = bit === '1' ? this.frequencies.data1 : this.frequencies.data0;
-                await this.playTone(freq, this.bitDuration);
-                await this.delay(20); // Small gap between bits
+            complete() {
+                this.stopListening();
+                document.getElementById('audio-protocol')?.remove();
+                loadProgress();
             }
 
+            stopListening() {
+                this.isListening = false;
+                if (this.currentStream) {
+                    this.currentStream.getTracks().forEach(track => track.stop());
+                }
+                clearTimeout(this.timeout);
+            }
+
+            // UI Methods
+            showHandshakeUI() {
+                const modal = document.createElement('div');
+                modal.id = 'audio-protocol';
+                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 3000; padding: 20px;';
+
+                modal.innerHTML = `
+                    <div style="max-width: 400px; margin: 50px auto; text-align: center;">
+                        <h2>🔊 Audio Transfer - Initiator</h2>
+
+                        <div style="font-size: 60px; margin: 20px;">📡</div>
+
+                        <div id="protocol-status" style="padding: 20px; background: #f0f0f0; border-radius: 8px; margin: 20px 0;">
+                            Initializing...
+                        </div>
+
+                        <div id="data-progress" style="display: none; margin: 20px 0;">
+                            <div style="background: #e0e0e0; height: 20px; border-radius: 10px; overflow: hidden;">
+                                <div id="progress-bar" style="background: #4CAF50; height: 100%; width: 0%; transition: width 0.3s;"></div>
+                            </div>
+                        </div>
+
+                        <button onclick="audioProtocol.cancel()" class="submit-button" style="background: #f44336;">
+                            Cancel Transfer
+                        </button>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+            }
+
+            showResponderUI() {
+                const modal = document.createElement('div');
+                modal.id = 'audio-protocol';
+                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 3000; padding: 20px;';
+
+                modal.innerHTML = `
+                    <div style="max-width: 400px; margin: 50px auto; text-align: center;">
+                        <h2>🎤 Audio Transfer - Listener</h2>
+
+                        <div style="font-size: 60px; margin: 20px;">👂</div>
+
+                        <div id="protocol-status" style="padding: 20px; background: #f0f0f0; border-radius: 8px; margin: 20px 0;">
+                            Listening for connection...
+                        </div>
+
+                        <div id="data-progress" style="display: none; margin: 20px 0;">
+                            <div>Bits received: <span id="bit-count">0</span></div>
+                        </div>
+
+                        <button onclick="audioProtocol.cancel()" class="submit-button" style="background: #f44336;">
+                            Cancel Transfer
+                        </button>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+            }
+
+            updateStatus(message) {
+                const status = document.getElementById('protocol-status');
+                if (status) status.textContent = message;
+            }
+
+            updateDataProgress() {
+                const progress = document.getElementById('data-progress');
+                const count = document.getElementById('bit-count');
+                if (progress) progress.style.display = 'block';
+                if (count) count.textContent = this.dataBuffer.length;
+            }
+
+            cancel() {
+                this.stopListening();
+                document.getElementById('audio-protocol')?.remove();
+            }
+
+            // Helper methods
             async playTone(frequency, duration) {
                 const oscillator = this.audioContext.createOscillator();
                 const gainNode = this.audioContext.createGain();
@@ -6667,11 +6956,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 oscillator.frequency.value = frequency;
                 oscillator.type = 'sine';
 
-                // Louder volume
-                gainNode.gain.setValueAtTime(0, this.audioContext.currentTime);
-                gainNode.gain.linearRampToValueAtTime(0.5, this.audioContext.currentTime + 0.01);
-                gainNode.gain.linearRampToValueAtTime(0.5, this.audioContext.currentTime + duration/1000 - 0.01);
-                gainNode.gain.linearRampToValueAtTime(0, this.audioContext.currentTime + duration/1000);
+                gainNode.gain.setValueAtTime(0.6, this.audioContext.currentTime);
 
                 oscillator.start();
                 oscillator.stop(this.audioContext.currentTime + duration/1000);
@@ -6683,277 +6968,23 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 return new Promise(resolve => setTimeout(resolve, ms));
             }
 
-            // Improved listening with state machine
-            async startListening() {
-                if (!this.audioContext) this.init();
+            stringToBinary(str) {
+                return str.split('').map(char =>
+                    char.charCodeAt(0).toString(2).padStart(8, '0')
+                ).join('');
+            }
 
-                this.showListenUI();
-                this.state = 'waiting'; // waiting, receiving_length, receiving_data, complete
-                this.receivedBits = '';
-                this.expectedLength = 0;
-
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({
-                        audio: {
-                            echoCancellation: false,
-                            noiseSuppression: false,
-                            autoGainControl: false
-                        }
-                    });
-
-                    const source = this.audioContext.createMediaStreamSource(stream);
-                    const analyser = this.audioContext.createAnalyser();
-
-                    analyser.fftSize = 4096; // Higher resolution
-                    source.connect(analyser);
-
-                    const bufferLength = analyser.frequencyBinCount;
-                    const dataArray = new Uint8Array(bufferLength);
-
-                    this.isListening = true;
-                    this.lastDetectedTime = 0;
-
-                    const checkFrequencies = () => {
-                        if (!this.isListening) return;
-
-                        analyser.getByteFrequencyData(dataArray);
-                        const detected = this.detectTone(dataArray, analyser.context.sampleRate, bufferLength);
-
-                        if (detected) {
-                            const now = Date.now();
-                            if (now - this.lastDetectedTime > 50) { // Debounce
-                                this.handleDetectedTone(detected);
-                                this.lastDetectedTime = now;
-                            }
-                        }
-
-                        requestAnimationFrame(checkFrequencies);
-                    };
-
-                    checkFrequencies();
-                    this.currentStream = stream;
-
-                } catch(err) {
-                    console.error('Mic error:', err);
-                    this.showMicError();
+            binaryToString(binary) {
+                let str = '';
+                for (let i = 0; i < binary.length; i += 8) {
+                    str += String.fromCharCode(parseInt(binary.substr(i, 8), 2));
                 }
-            }
-
-            detectTone(dataArray, sampleRate, bufferLength) {
-                // Check for specific frequencies
-                const freqToCheck = [
-                    this.frequencies.start,
-                    this.frequencies.end,
-                    this.frequencies.data0,
-                    this.frequencies.data1
-                ];
-
-                for (let targetFreq of freqToCheck) {
-                    const bin = Math.round(targetFreq * bufferLength * 2 / sampleRate);
-
-                    // Check if this frequency is strong
-                    if (dataArray[bin] > 150) { // Threshold
-                        // Check neighboring bins too
-                        const avgStrength = (dataArray[bin-1] + dataArray[bin] + dataArray[bin+1]) / 3;
-                        if (avgStrength > 140) {
-                            return targetFreq;
-                        }
-                    }
-                }
-
-                return null;
-            }
-
-            handleDetectedTone(frequency) {
-                if (Math.abs(frequency - this.frequencies.start) < 100) {
-                    // Start tone detected
-                    this.state = 'receiving_length';
-                    this.receivedBits = '';
-                    document.getElementById('listen-status').textContent = '📡 Start signal detected!';
-
-                } else if (this.state === 'receiving_length') {
-                    // Receiving length bits
-                    if (Math.abs(frequency - this.frequencies.data0) < 100) {
-                        this.receivedBits += '0';
-                    } else if (Math.abs(frequency - this.frequencies.data1) < 100) {
-                        this.receivedBits += '1';
-                    }
-
-                    if (this.receivedBits.length === 16) {
-                        this.expectedLength = parseInt(this.receivedBits, 2);
-                        this.state = 'receiving_data';
-                        this.receivedBits = '';
-                        document.getElementById('listen-status').textContent =
-                            `Expecting ${this.expectedLength} bits of data...`;
-                    }
-
-                } else if (this.state === 'receiving_data') {
-                    // Receiving actual data
-                    if (Math.abs(frequency - this.frequencies.data0) < 100) {
-                        this.receivedBits += '0';
-                    } else if (Math.abs(frequency - this.frequencies.data1) < 100) {
-                        this.receivedBits += '1';
-                    }
-
-                    document.getElementById('listen-status').textContent =
-                        `Received ${this.receivedBits.length}/${this.expectedLength} bits...`;
-
-                    if (this.receivedBits.length >= this.expectedLength) {
-                        this.processReceivedData();
-                    }
-
-                } else if (Math.abs(frequency - this.frequencies.end) < 100) {
-                    // End tone - process whatever we have
-                    if (this.receivedBits.length > 0) {
-                        this.processReceivedData();
-                    }
-                }
-            }
-
-            processReceivedData() {
-                this.state = 'complete';
-                this.stopListening();
-
-                try {
-                    const decoded = this.binaryToString(this.receivedBits);
-                    const data = JSON.parse(decoded);
-
-                    // Import the data
-                    const imported = {
-                        users: {
-                            [data.u]: {
-                                answers: data.a,
-                                timestamps: {},
-                                reasons: {},
-                                attempts: {}
-                            }
-                        }
-                    };
-
-                    mergeClassData(imported);
-
-                    document.getElementById('listen-status').innerHTML =
-                        `<div style="color: #4CAF50; font-size: 20px;">✅ Success!</div>
-                         <div>Received data from ${data.u}</div>`;
-
-                    setTimeout(() => {
-                        document.getElementById('audio-listen')?.remove();
-                        loadProgress();
-                    }, 2000);
-
-                } catch(err) {
-                    console.error('Decode error:', err);
-                    document.getElementById('listen-status').textContent =
-                        '❌ Error decoding data. Please try again.';
-                }
-            }
-
-            // Keep existing UI methods
-            showTransmitUI(dataLength) {
-                const modal = document.createElement('div');
-                modal.id = 'audio-transmit';
-                modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 3000; display: flex; align-items: center; justify-content: center;';
-
-                modal.innerHTML = `
-                    <div style="background: white; padding: 40px; border-radius: 10px; text-align: center; max-width: 400px;">
-                        <h2>🔊 Transmitting Data</h2>
-
-                        <div style="font-size: 80px; margin: 20px 0;">📡</div>
-
-                        <div style="margin: 20px 0;">
-                            <div style="background: #f0f0f0; border-radius: 20px; height: 20px; overflow: hidden;">
-                                <div id="audio-progress" style="background: #4CAF50; height: 100%; width: 0%; transition: width 0.3s;"></div>
-                            </div>
-                        </div>
-
-                        <p id="audio-status">Playing data tones...</p>
-                        <p style="color: #666; font-size: 14px;">Keep phones close together</p>
-
-                        <button onclick="audioTransfer.cancelTransmit()" class="submit-button" style="background: #f44336; margin-top: 20px;">
-                            Cancel
-                        </button>
-                    </div>
-                `;
-
-                document.body.appendChild(modal);
-            }
-
-            updateProgress(current, total) {
-                const percent = (current / total) * 100;
-                const progressBar = document.getElementById('audio-progress');
-                if (progressBar) {
-                    progressBar.style.width = percent + '%';
-                }
-            }
-
-            transmissionComplete() {
-                const modal = document.getElementById('audio-transmit');
-                if (modal) {
-                    modal.querySelector('#audio-status').textContent = '✅ Transmission complete!';
-                    setTimeout(() => modal.remove(), 2000);
-                }
-            }
-
-            cancelTransmit() {
-                this.isTransmitting = false;
-                document.getElementById('audio-transmit')?.remove();
-            }
-
-            showListenUI() {
-                const modal = document.createElement('div');
-                modal.id = 'audio-listen';
-                modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 3000; display: flex; align-items: center; justify-content: center;';
-
-                modal.innerHTML = `
-                    <div style="background: white; padding: 40px; border-radius: 10px; text-align: center; max-width: 400px;">
-                        <h2>🎤 Listening for Data</h2>
-
-                        <div style="font-size: 80px; margin: 20px 0;" class="pulse-animation">👂</div>
-
-                        <p id="listen-status">Waiting for transmission...</p>
-                        <p style="color: #666; font-size: 14px;">Keep phones close together</p>
-
-                        <button onclick="audioTransfer.stopListening()" class="submit-button" style="background: #f44336; margin-top: 20px;">
-                            Cancel
-                        </button>
-                    </div>
-                `;
-
-                document.body.appendChild(modal);
-
-                // Add pulse animation
-                const style = document.createElement('style');
-                style.textContent = `
-                    .pulse-animation {
-                        animation: pulse 1.5s infinite;
-                    }
-                    @keyframes pulse {
-                        0% { transform: scale(1); }
-                        50% { transform: scale(1.1); }
-                        100% { transform: scale(1); }
-                    }
-                `;
-                document.head.appendChild(style);
-            }
-
-            stopListening() {
-                this.isListening = false;
-                if (this.currentStream) {
-                    this.currentStream.getTracks().forEach(track => track.stop());
-                }
-                document.getElementById('audio-listen')?.remove();
-            }
-
-            showMicError() {
-                document.getElementById('listen-status').innerHTML = `
-                    <span style="color: red;">❌ Microphone access denied</span><br>
-                    <small>Please allow microphone access and try again</small>
-                `;
+                return str;
             }
         }
 
         // Initialize audio transfer
-        const audioTransfer = new AudioTransfer();
+        const audioProtocol = new AudioProtocol();
 
         // Add to sync menu
         window.showAudioSync = function() {
@@ -6966,14 +6997,14 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     <h2>🔊 Audio Transfer</h2>
                     <p>Transfer data using sound waves!</p>
 
-                    <button onclick="audioTransfer.transmitData(); this.closest('[style*=fixed]').remove();"
+                    <button onclick="audioProtocol.startHandshake(); this.closest('[style*=fixed]').remove();"
                             class="sync-button" style="width: 100%; margin-bottom: 10px; background: #4CAF50;">
-                        📡 Send (Play Sounds)
+                        📡 Start Transfer (Desktop)
                     </button>
 
-                    <button onclick="audioTransfer.startListening(); this.closest('[style*=fixed]').remove();"
+                    <button onclick="audioProtocol.respondToHandshake(); this.closest('[style*=fixed]').remove();"
                             class="sync-button" style="width: 100%; margin-bottom: 10px; background: #2196F3;">
-                        🎤 Receive (Listen)
+                        🎤 Receive (Phone)
                     </button>
 
                     <div style="padding: 10px; background: #fff3e0; border-radius: 5px; margin: 10px 0; font-size: 12px;">
