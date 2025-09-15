@@ -4474,9 +4474,15 @@ if (chartInstances[`dotplot-${questionId}`]) {
             let menuContent = '';
 
             if (isMobile) {
-                // Phone menu - can scan and enter codes
+                // Phone menu - Teacher role for QR-Keyboard sync
                 menuContent = `
                     <h2 style="margin-top: 0; text-align: center;">📱 Phone Menu</h2>
+
+                    <button onclick="startTeacherQRKeyboard(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #9C27B0;">
+                        🎯 Collect from Students
+                        <div style="font-size: 12px; opacity: 0.8;">Scan QRs & give codes</div>
+                    </button>
 
                     <button onclick="enterTransferCode(); this.closest('[style*=fixed]').remove();"
                             class="sync-button" style="width: 100%; margin-bottom: 10px; background: #4CAF50;">
@@ -4485,7 +4491,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     </button>
 
                     <button onclick="startSmartSync(); this.closest('[style*=fixed]').remove();"
-                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #9C27B0;">
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #2196F3;">
                         📷 Scan Another Phone
                         <div style="font-size: 12px; opacity: 0.8;">Use camera to scan QR</div>
                     </button>
@@ -4497,9 +4503,15 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     </button>
                 `;
             } else {
-                // Desktop menu - no camera required
+                // Desktop menu - Student role for QR-Keyboard sync
                 menuContent = `
                     <h2 style="margin-top: 0; text-align: center;">💻 Desktop Menu</h2>
+
+                    <button onclick="startStudentQRKeyboard(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #9C27B0;">
+                        📤 Send to Teacher
+                        <div style="font-size: 12px; opacity: 0.8;">Show QR & type codes</div>
+                    </button>
 
                     <button onclick="shareViaCode(); this.closest('[style*=fixed]').remove();"
                             class="sync-button" style="width: 100%; margin-bottom: 10px; background: #4CAF50;">
@@ -4515,7 +4527,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 `;
             }
 
-            // Audio transfer option
+            // Audio transfer option (both mobile and desktop)
             menuContent += `
                 <button onclick="showAudioSync(); this.closest('[style*=fixed]').remove();"
                         class="sync-button" style="width: 100%; margin-bottom: 10px; background: #FF9800;">
@@ -4524,7 +4536,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 </button>
             `;
 
-            // Both get file import option
+            // File import option (both)
             menuContent += `
                 <input type="file" id="import-input" accept=".json" style="display:none;"
                        onchange="importClassData(event); this.closest('[style*=fixed]').remove();">
