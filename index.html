@@ -9593,22 +9593,38 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         this.currentStudent = parsed.user;
                         this.receivedChunks = 0;
                         this.expectedChunks = 0;
-                        this.lastScannedData = null; // Track last scan
+                        this.lastScannedData = null;
+                        this.scannedChunks = new Set();
 
                         const syncCode = this.generateSyncCode(parsed.user);
 
-                        document.getElementById('sync-code-display').style.display = 'block';
-                        document.getElementById('sync-code-display').textContent = syncCode;
-
-                        document.getElementById('sync-status').innerHTML = `
-                            <strong>Student: ${parsed.user}</strong><br>
-                            Tell them: <span style="font-size: 20px; color: #ff9800;">${syncCode}</span>
-                        `;
-
-                        // Pause scanner after successful scan
+                        // Pause scanner
                         if (this.currentScanner) {
                             this.currentScanner.pause();
                         }
+
+                        // Show code prominently
+                        document.getElementById('sync-code-display').style.display = 'block';
+                        document.getElementById('sync-code-display').textContent = syncCode;
+
+                        // Add button to continue after student enters code
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="padding: 15px; background: #fff3e0; border-radius: 8px;">
+                                <div><strong>Student: ${parsed.user}</strong></div>
+                                <div style="margin: 10px 0;">Tell them code: <strong style="color: #ff9800;">${syncCode}</strong></div>
+                                <button onclick="qrKeyboard.startReceivingData()"
+                                        style="margin-top: 15px;
+                                               padding: 15px 30px;
+                                               background: #4CAF50;
+                                               color: white;
+                                               border: none;
+                                               border-radius: 8px;
+                                               font-size: 18px;">
+                                    Student Entered Code - Continue
+                                </button>
+                            </div>
+                        `;
+
                         return;
                     }
 
@@ -9731,6 +9747,28 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     <div style="padding: 20px; background: #e3f2fd; border-radius: 8px;">
                         <div style="font-size: 24px;">📷 Scanning...</div>
                         <div>Point at QR #${(this.receivedChunks || 0) + 1}</div>
+                    </div>
+                `;
+            }
+
+            // Add method to start receiving data QRs:
+            startReceivingData() {
+                // Hide the sync code
+                document.getElementById('sync-code-display').style.display = 'none';
+
+                // Clear last scan data
+                this.lastScannedData = null;
+
+                // Resume scanner
+                if (this.currentScanner) {
+                    this.currentScanner.resume();
+                }
+
+                // Update display
+                document.getElementById('sync-status').innerHTML = `
+                    <div style="padding: 20px; background: #e3f2fd; border-radius: 8px;">
+                        <div style="font-size: 24px;">📷 Ready to scan data QRs</div>
+                        <div>Point camera at student's screen</div>
                     </div>
                 `;
             }
