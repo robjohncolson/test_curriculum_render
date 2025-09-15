@@ -9819,9 +9819,9 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
             // Make sure generateFinalCode exists and is simple:
             generateFinalCode() {
-                // Generate a 5-character code starting with DONE
-                const num = Math.floor(Math.random() * 10);
-                return 'DONE' + num;  // Returns "DONE0" through "DONE9"
+                // Generate a 5-character code starting with OK
+                const num = Math.floor(Math.random() * 1000);
+                return 'OK' + num.toString().padStart(3, '0');  // "OK000" to "OK999" - also 5 chars
             }
 
             // Add manual complete method
@@ -9846,7 +9846,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
             verifyFinalState() {
                 const code = document.getElementById('final-code').value.toUpperCase();
 
-                if (code.startsWith('DONE')) {
+                if (code.startsWith('OK')) {
                     // Success! Send confirmation
                     const confirmation = {
                         type: 'CONFIRM',
@@ -9960,7 +9960,8 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
         // Add a button to manually finish and generate final code:
         window.finishStudentSync = function() {
-            const finalCode = 'DONE' + Math.floor(Math.random() * 10);
+            const num = Math.floor(Math.random() * 1000);
+            const finalCode = 'OK' + num.toString().padStart(3, '0');
 
             document.getElementById('sync-code-display').style.display = 'block';
             document.getElementById('sync-code-display').textContent = finalCode;
