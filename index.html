@@ -5216,13 +5216,40 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
         }
 
-        // Chunked QR Code Transfer System
+        // CRC8 checksum calculation for error detection
+        function crc8(data) {
+            const polynomial = 0x07; // CRC-8-CCITT polynomial
+            let crc = 0x00;
+
+            for (let i = 0; i < data.length; i++) {
+                crc ^= data.charCodeAt(i);
+                for (let j = 0; j < 8; j++) {
+                    if (crc & 0x80) {
+                        crc = (crc << 1) ^ polynomial;
+                    } else {
+                        crc <<= 1;
+                    }
+                }
+                crc &= 0xFF; // Keep it 8-bit
+            }
+            return crc;
+        }
+
+        // Calculate CRC for received packet
+        function calculateCRC(packet) {
+            const data = packet.data;
+            return crc8(data);
+        }
+
+        // Chunked QR Code Transfer System with Error Detection & Retransmission
         class ChunkedQRTransfer {
             constructor() {
                 this.chunks = [];
                 this.currentChunk = 0;
                 this.scannedChunks = {};
                 this.expectedChunks = 0;
+                this.retransmissionRequests = new Set(); // Track chunks that need retransmission
+                this.ackPackets = {}; // Store successful acknowledgments
             }
 
             // Sender side - create chunks
@@ -5293,10 +5320,10 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 qrDiv.innerHTML = ''; // Clear previous
 
                 const chunkData = {
-                    type: 'chunk',
-                    chunk: this.currentChunk,
+                    seq: this.currentChunk,        // Sequence number
+                    data: this.chunks[this.currentChunk],   // Actual data
+                    crc: crc8(this.chunks[this.currentChunk]), // CRC checksum
                     total: this.chunks.length,
-                    data: this.chunks[this.currentChunk],
                     username: currentUsername
                 };
 
@@ -5386,7 +5413,21 @@ if (chartInstances[`dotplot-${questionId}`]) {
             handleScannedChunk(decodedText, scanner) {
                 try {
                     const chunk = JSON.parse(decodedText);
-                    if (chunk.type === 'chunk') {
+
+                    // Handle retransmission requests from receiver
+                    if (chunk.type === 'retransmit') {
+                        this.handleRetransmitRequest(chunk, scanner);
+                        return;
+                    }
+
+                    // Handle acknowledgment packets
+                    if (chunk.type === 'ack') {
+                        this.handleAcknowledgment(chunk, scanner);
+                        return;
+                    }
+
+                    // Handle regular data chunks
+                    if (chunk.seq !== undefined && chunk.data && chunk.crc !== undefined) {
                         this.processChunk(chunk, scanner);
                     }
                 } catch(e) {
@@ -5395,9 +5436,20 @@ if (chartInstances[`dotplot-${questionId}`]) {
             }
 
             processChunk(chunk, scanner) {
+                // Verify CRC checksum
+                const calculatedCRC = calculateCRC(chunk);
+                if (calculatedCRC !== chunk.crc) {
+                    console.warn(`CRC mismatch for chunk ${chunk.seq}. Expected: ${chunk.crc}, Got: ${calculatedCRC}`);
+                    this.requestRetransmit(chunk.seq, scanner);
+                    return;
+                }
+
                 // Store the chunk
-                this.scannedChunks[chunk.chunk] = chunk.data;
+                this.scannedChunks[chunk.seq] = chunk.data;
                 this.expectedChunks = chunk.total;
+
+                // Send acknowledgment
+                this.sendAcknowledgment(chunk.seq, scanner);
 
                 // Update progress
                 const received = Object.keys(this.scannedChunks).length;
@@ -5420,6 +5472,115 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     scanner.stop();
                     this.assembleAndImport(chunk.username);
                 }
+            }
+
+            // Request retransmission of a corrupted chunk
+            requestRetransmit(seq, scanner) {
+                const retransmitRequest = {
+                    type: 'retransmit',
+                    seq: seq,
+                    timestamp: Date.now()
+                };
+
+                // Show retransmission request QR
+                this.showRetransmitQR(retransmitRequest, scanner);
+            }
+
+            // Show QR code for retransmission request
+            showRetransmitQR(request, scanner) {
+                const modal = document.createElement('div');
+                modal.id = 'retransmit-modal';
+                modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 4000; display: flex; align-items: center; justify-content: center;';
+                modal.innerHTML = `
+                    <div style="background: white; padding: 20px; border-radius: 10px; max-width: 400px; text-align: center;">
+                        <h3>⚠️ Data Error Detected</h3>
+                        <p>Chunk ${request.seq + 1} was corrupted. Please ask the sender to resend it.</p>
+                        <div id="retransmit-qr" style="margin: 20px 0;"></div>
+                        <p style="font-size: 12px; color: #666;">Show this QR to the sender device</p>
+                        <button onclick="this.closest('#retransmit-modal').remove(); chunkedTransfer.resumeScanning('${scanner}');" class="submit-button">
+                            Resume Scanning
+                        </button>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                new QRCode(document.getElementById('retransmit-qr'), {
+                    text: JSON.stringify(request),
+                    width: 200,
+                    height: 200,
+                    correctLevel: QRCode.CorrectLevel.L
+                });
+            }
+
+            // Resume scanning after retransmission request
+            resumeScanning(scanner) {
+                // Scanner is already running, just continue
+            }
+
+            // Send acknowledgment for successful chunk receipt
+            sendAcknowledgment(seq, scanner) {
+                const ackPacket = {
+                    type: 'ack',
+                    seq: seq,
+                    timestamp: Date.now()
+                };
+
+                // Show acknowledgment QR briefly
+                this.showAckQR(ackPacket, scanner);
+            }
+
+            // Show acknowledgment QR
+            showAckQR(ack, scanner) {
+                const existingAck = document.getElementById('ack-modal');
+                if (existingAck) existingAck.remove();
+
+                const modal = document.createElement('div');
+                modal.id = 'ack-modal';
+                modal.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #4CAF50; color: white; padding: 10px; border-radius: 5px; z-index: 3001;';
+                modal.innerHTML = `
+                    <div>✅ Chunk ${ack.seq + 1} received successfully</div>
+                `;
+                document.body.appendChild(modal);
+
+                // Auto-remove after 2 seconds
+                setTimeout(() => modal.remove(), 2000);
+            }
+
+            // Handle retransmission request (sender side)
+            handleRetransmitRequest(request, scanner) {
+                console.log(`Retransmission requested for chunk ${request.seq}`);
+                this.retransmissionRequests.add(request.seq);
+
+                // Jump to the requested chunk
+                this.currentChunk = request.seq;
+                this.showCurrentChunk();
+
+                // Show retransmission notification
+                this.showRetransmitNotification(request.seq);
+            }
+
+            // Show retransmission notification
+            showRetransmitNotification(seq) {
+                const notification = document.createElement('div');
+                notification.style.cssText = 'position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #FF9800; color: white; padding: 10px 20px; border-radius: 5px; z-index: 3001;';
+                notification.innerHTML = `🔄 Retransmitting chunk ${seq + 1}...`;
+                document.body.appendChild(notification);
+
+                setTimeout(() => notification.remove(), 3000);
+            }
+
+            // Handle acknowledgment (sender side)
+            handleAcknowledgment(ack, scanner) {
+                console.log(`Acknowledgment received for chunk ${ack.seq}`);
+                this.ackPackets[ack.seq] = true;
+
+                // Show acknowledgment notification
+                const notification = document.createElement('div');
+                notification.style.cssText = 'position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: #4CAF50; color: white; padding: 10px 20px; border-radius: 5px; z-index: 3001;';
+                notification.innerHTML = `✅ Chunk ${ack.seq + 1} acknowledged`;
+                document.body.appendChild(notification);
+
+                setTimeout(() => notification.remove(), 2000);
             }
 
             assembleAndImport(username) {
@@ -6797,6 +6958,15 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 this.windowType = 'hamming'; // 'hamming', 'hann', 'blackman'
                 this.detectionMode = 'hybrid'; // 'original', 'enhanced', 'hybrid'
                 this.detectionStats = { enhanced: 0, original: 0, total: 0 };
+
+                // Frequency Band Testing
+                // Different frequencies work better in different environments
+                this.frequencyBands = [
+                    { start: 1000, end: 2000, name: 'low' },
+                    { start: 2000, end: 4000, name: 'mid' },
+                    { start: 4000, end: 8000, name: 'high' },
+                    { start: 8000, end: 15000, name: 'ultrasonic' }
+                ];
             }
 
             init() {
@@ -6818,6 +6988,15 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 // Quick hello and immediate transmission
                 await this.playTone(this.tones.HELLO, 100); // Quick hello
                 await this.delay(50); // Very brief wait
+
+                // Perform channel calibration before data transmission
+                try {
+                    this.updateStatus('🔧 Calibrating channel...');
+                    await this.calibrateChannel();
+                    this.updateStatus('✅ Calibration complete, starting transmission...');
+                } catch (error) {
+                    this.updateStatus(`⚠️ Calibration failed: ${error.message}, proceeding anyway...`);
+                }
 
                 // Start sending immediately with header
                 this.transmitWithHeader();
@@ -7234,7 +7413,38 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 this.lastTone = tone.name;
                 this.lastToneTime = now;
 
+                // Initialize tone stats if not exists
+                if (!this.toneStats) {
+                    this.toneStats = {
+                        expected: 0,
+                        received: 0,
+                        noise: 0,
+                        lastGoodTone: Date.now()
+                    };
+                }
+
+                // Track received tones
+                this.toneStats.received++;
+
                 console.log(`Detected: ${tone.name} in state ${this.state}`);
+
+                // Check transmission quality and adapt timing if needed
+                if (this.toneStats.received > 10) { // Only check after some samples
+                    const quality = this.toneStats.received / Math.max(this.toneStats.expected + this.toneStats.received, 1);
+
+                    // If quality drops below 80%, slow down transmission
+                    if (quality < 0.8) {
+                        console.log(`Quality degraded (${Math.round(quality * 100)}%), slowing down...`);
+                        this.config.TONE_DURATION *= 1.5;
+                        this.config.INTER_SYMBOL_DELAY *= 1.5;
+
+                        // Prevent runaway slowdown
+                        if (this.config.TONE_DURATION > 200) this.config.TONE_DURATION = 200;
+                        if (this.config.INTER_SYMBOL_DELAY > 100) this.config.INTER_SYMBOL_DELAY = 100;
+
+                        console.log(`New timing: ${this.config.TONE_DURATION}ms tones, ${this.config.INTER_SYMBOL_DELAY}ms delay`);
+                    }
+                }
 
                 switch (this.state) {
                     case 'listening_hello':
@@ -7473,7 +7683,337 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         this.updateStatus(`Sending: ${Math.round(i * 100 / hexData.length)}%`);
                     }
                 }
+
+            // Progressive Fallback Strategy - Start optimistic, fall back gracefully
+            async smartTransmit(data) {
+                // Try fast parallel channels first
+                if (await this.tryParallelTransmit(data)) return;
+
+                // Fall back to single channel hex
+                if (await this.trySingleChannelHex(data)) return;
+
+                // Fall back to slow binary
+                if (await this.tryBinaryTransmit(data)) return;
+
+                // Ultimate fallback: show QR code
+                this.showFallbackQR(data);
+            }
+
+            // Try parallel channel transmission (fastest method)
+            async tryParallelTransmit(data) {
+                try {
+                    this.updateStatus('🚀 Trying parallel channel transmission...');
+                    await this.transmitParallel(data);
+                    this.updateStatus('✅ Parallel transmission successful');
+                    return true;
+                } catch (error) {
+                    this.updateStatus('❌ Parallel transmission failed, trying fallback...');
+                    return false;
+                }
+            }
+
+            // Try single channel hex transmission
+            async trySingleChannelHex(data) {
+                // Temporarily disable parallel channels
+                const originalChannels = this.config.PARALLEL_CHANNELS;
+                try {
+                    this.updateStatus('📡 Trying single channel hex transmission...');
+                    this.config.PARALLEL_CHANNELS = 1;
+
+                    await this.transmitWithAcks(data);
+
+                    this.updateStatus('✅ Single channel hex transmission successful');
+                    return true;
+                } catch (error) {
+                    this.updateStatus('❌ Single channel hex failed, trying binary...');
+                    return false;
+                } finally {
+                    // Always restore original setting
+                    this.config.PARALLEL_CHANNELS = originalChannels;
+                }
+            }
+
+            // Try slow binary transmission (most compatible)
+            async tryBinaryTransmit(data) {
+                try {
+                    this.updateStatus('🐌 Trying binary transmission...');
+                    await this.transmitData(data);
+                    this.updateStatus('✅ Binary transmission successful');
+                    return true;
+                } catch (error) {
+                    this.updateStatus('❌ Binary transmission failed, showing QR code...');
+                    return false;
+                }
+            }
+
+            // Ultimate fallback: display QR code
+            showFallbackQR(data) {
+                this.updateStatus('📱 Displaying QR code fallback...');
+                // Use existing QR functionality
+                if (typeof showMyQR === 'function') {
+                    // Store data for QR display
+                    this.fallbackData = data;
+                    showMyQR();
+                } else {
+                    alert('QR code fallback not available. Transmission failed.');
+                }
+            }
+
+            // Bidirectional Acknowledgment Protocol
+            // Send data in small blocks with ACKs for reliable transmission
+            async transmitWithAcks(data) {
+                const BLOCK_SIZE = 16; // hex chars per block
+
+                this.updateStatus('📦 Starting reliable transmission...');
+
+                for (let i = 0; i < data.length; i += BLOCK_SIZE) {
+                    const block = data.slice(i, i + BLOCK_SIZE);
+                    const blockIndex = Math.floor(i / BLOCK_SIZE);
+
+                    let success = false;
+
+                    // Try up to 3 times
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        this.updateStatus(`📤 Sending block ${blockIndex + 1} (attempt ${attempt + 1}/3)`);
+
+                        // Send block with sequence number
+                        await this.sendBlock(block, blockIndex);
+
+                        // Wait for ACK with timeout
+                        const ack = await this.waitForBlockAck(blockIndex, 500);
+                        if (ack) {
+                            success = true;
+                            this.updateStatus(`✅ Block ${blockIndex + 1} acknowledged`);
+                            break;
                         }
+
+                        // Slow down on retry
+                        this.config.TONE_DURATION *= 1.2;
+                        this.updateStatus(`⏳ Block ${blockIndex + 1} timeout, retrying...`);
+                        await this.delay(100); // Brief pause before retry
+                    }
+
+                    if (!success) {
+                        throw new Error(`Failed to transmit block ${blockIndex + 1} after 3 attempts`);
+                    }
+
+                    // Reset tone duration after successful block
+                    this.config.TONE_DURATION = Math.max(10, this.config.TONE_DURATION * 0.95);
+                }
+
+                // Send completion signal
+                await this.playTone(this.tones.DONE, 100);
+                this.updateStatus('🎉 Transmission completed successfully');
+            }
+
+            // Send individual block with sequence number
+            async sendBlock(block, sequenceNumber) {
+                // Send sequence number first (2 hex chars = 8 bits, supports up to 256 blocks)
+                const seqHex = sequenceNumber.toString(16).padStart(2, '0');
+
+                // Use parallel channels if enabled
+                if (this.config.PARALLEL_CHANNELS === 2) {
+                    await this.transmitParallel(seqHex);
+                    await this.transmitParallel(block);
+                } else {
+                    // Send sequence
+                    for (let i = 0; i < seqHex.length; i++) {
+                        const hexChar = parseInt(seqHex[i], 16);
+                        await this.playTone(this.dataFrequencies[hexChar], this.config.TONE_DURATION);
+                        await this.delay(this.config.INTER_SYMBOL_DELAY);
+                    }
+
+                    // Send block data
+                    for (let i = 0; i < block.length; i++) {
+                        const hexChar = parseInt(block[i], 16);
+                        await this.playTone(this.dataFrequencies[hexChar], this.config.TONE_DURATION);
+                        await this.delay(this.config.INTER_SYMBOL_DELAY);
+                    }
+                }
+            }
+
+            // Wait for block acknowledgment
+            async waitForBlockAck(expectedSequence, timeout = 500) {
+                return new Promise((resolve) => {
+                    const timeoutId = setTimeout(() => {
+                        resolve(false); // Timeout - no ACK received
+                    }, timeout);
+
+                    // Store expected sequence for this ACK wait
+                    this.expectedAckSequence = expectedSequence;
+
+                    // Set up one-time handler for block ACK
+                    const originalHandleTone = this.handleTone;
+                    this.handleTone = (tone) => {
+                        // Check if this is an ACK tone
+                        if (tone.name === 'ACK') {
+                            clearTimeout(timeoutId);
+                            this.handleTone = originalHandleTone; // Restore original handler
+                            delete this.expectedAckSequence; // Clean up
+                            resolve(true); // ACK received
+                        } else {
+                            // Pass other tones to original handler
+                            originalHandleTone.call(this, tone);
+                        }
+                    };
+                });
+            }
+
+            // Send acknowledgment for received block
+            async sendBlockAck(sequenceNumber) {
+                // Send ACK tone to confirm block receipt
+                await this.playTone(this.tones.ACK, 100);
+                this.updateStatus(`📨 Sent ACK for block ${sequenceNumber + 1}`);
+            }
+
+            // Receive data with bidirectional acknowledgments
+            async receiveWithAcks() {
+                this.updateStatus('👂 Listening for reliable transmission...');
+                this.state = 'receiving_blocks';
+                this.receivedBlocks = new Map(); // Store received blocks by sequence
+                this.nextExpectedSequence = 0;
+
+                // Set up handler for incoming blocks
+                const originalHandleTone = this.handleTone;
+                this.handleTone = async (tone) => {
+                    if (tone.name === 'DONE') {
+                        // Transmission complete
+                        this.handleTone = originalHandleTone;
+                        this.state = 'idle';
+                        this.processReceivedData();
+                        return;
+                    }
+
+                    // Handle data tones (blocks come as sequence + data)
+                    if (tone.name.startsWith('DATA_') || tone.hexValue !== undefined) {
+                        await this.handleIncomingBlock(tone);
+                    } else {
+                        // Pass other tones to original handler
+                        originalHandleTone.call(this, tone);
+                    }
+                };
+            }
+
+            // Handle incoming block data
+            async handleIncomingBlock(tone) {
+                let hexValue;
+
+                if (tone.hexValue !== undefined) {
+                    hexValue = tone.hexValue.toString(16);
+                } else if (tone.name === 'DATA_0') {
+                    hexValue = '0';
+                } else if (tone.name === 'DATA_1') {
+                    hexValue = '1';
+                } else {
+                    return; // Not a data tone
+                }
+
+                // Accumulate block data
+                if (!this.currentBlock) {
+                    this.currentBlock = {
+                        sequence: null,
+                        data: '',
+                        expectedLength: 16 // Default block size
+                    };
+                }
+
+                // First 2 characters are sequence number
+                if (this.currentBlock.data.length < 2) {
+                    this.currentBlock.sequenceHex = (this.currentBlock.sequenceHex || '') + hexValue;
+                    if (this.currentBlock.sequenceHex.length === 2) {
+                        this.currentBlock.sequence = parseInt(this.currentBlock.sequenceHex, 16);
+                    }
+                } else {
+                    // Rest is block data
+                    this.currentBlock.data += hexValue;
+
+                    // Check if block is complete
+                    if (this.currentBlock.data.length >= this.currentBlock.expectedLength + 2) {
+                        const sequence = this.currentBlock.sequence;
+                        const blockData = this.currentBlock.data.substring(2); // Remove sequence prefix
+
+                        // Store the block
+                        this.receivedBlocks.set(sequence, blockData);
+
+                        // Send ACK for this block
+                        await this.sendBlockAck(sequence);
+
+                        // Reset for next block
+                        this.currentBlock = null;
+
+                        this.updateStatus(`📦 Received block ${sequence + 1}`);
+                    }
+                }
+            }
+
+            // Process complete received data
+            processReceivedData() {
+                // Sort blocks by sequence and combine
+                const sortedBlocks = Array.from(this.receivedBlocks.entries())
+                    .sort((a, b) => a[0] - b[0])
+                    .map(([seq, data]) => data);
+
+                const completeData = sortedBlocks.join('');
+                this.updateStatus(`✅ Reception complete: ${completeData.length} hex chars received`);
+
+                // Here you would typically decode and process the complete data
+                // For now, just log it
+                console.log('Received complete data:', completeData);
+
+                // Clean up
+                this.receivedBlocks = null;
+                this.nextExpectedSequence = 0;
+            }
+
+            // Start a reliable transfer using the bidirectional ACK protocol
+            async startReliableTransfer() {
+                try {
+                    this.updateStatus('🔄 Preparing reliable transfer...');
+
+                    // Prepare sample data (or use real data from the application)
+                    const sampleData = this.prepareSampleData();
+
+                    // Convert to hex for transmission
+                    const hexData = this.stringToHex(sampleData);
+
+                    this.updateStatus(`📊 Prepared ${hexData.length} hex characters for transmission`);
+
+                    // Start the handshake process
+                    await this.startHandshake();
+
+                    // Wait a moment for handshake to complete
+                    await this.delay(1000);
+
+                    // Use the bidirectional ACK protocol
+                    await this.transmitWithAcks(hexData);
+
+                } catch (error) {
+                    this.updateStatus(`❌ Transfer failed: ${error.message}`);
+                    console.error('Reliable transfer error:', error);
+                }
+            }
+
+            // Prepare sample data for demonstration
+            prepareSampleData() {
+                // Use current user data or create sample data
+                if (currentUsername && classData.users[currentUsername]) {
+                    const userData = classData.users[currentUsername];
+                    const answers = userData.answers || {};
+                    return JSON.stringify({
+                        user: currentUsername.substring(0, 10),
+                        timestamp: new Date().toISOString(),
+                        answers: Object.keys(answers).slice(-5) // Last 5 answers
+                    });
+                } else {
+                    // Fallback sample data
+                    return JSON.stringify({
+                        type: 'sample_data',
+                        timestamp: new Date().toISOString(),
+                        message: 'Bidirectional ACK Protocol Demo',
+                        data: '0123456789abcdef'.repeat(10) // 160 characters
+                    });
+                }
+            }
 
             // Handle parallel channel data reception
             handleParallelData(hexValue) {
@@ -7772,6 +8312,231 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 }
                 return str;
             }
+
+            // Add this method to AudioProtocol class
+            async calibrateChannel() {
+                // First, test frequency bands to find the cleanest one
+                try {
+                    const bestBand = await this.findBestBand();
+                    this.updateStatus(`🎯 Using ${bestBand.name} frequency band for transmission`);
+
+                    // Could potentially adjust data frequencies based on best band
+                    // For now, we just log the information
+                    console.log(`Best frequency band: ${bestBand.name} (${bestBand.start}-${bestBand.end}Hz, SNR: ${bestBand.snr.toFixed(2)})`);
+                } catch (error) {
+                    this.updateStatus(`⚠️ Frequency band testing failed: ${error.message}, proceeding with defaults...`);
+                }
+
+                const testRates = [
+                    { duration: 50, delay: 20, name: 'slow' },     // ~14 symbols/sec
+                    { duration: 20, delay: 10, name: 'medium' },   // ~33 symbols/sec
+                    { duration: 10, delay: 5, name: 'fast' },      // ~66 symbols/sec
+                    { duration: 5, delay: 2, name: 'ultrafast' }   // ~142 symbols/sec
+                ];
+
+                // Send test pattern at each rate
+                for (let rate of testRates) {
+                    await this.sendTestPattern(rate);
+                    await this.waitForAck(rate.name);
+                }
+            }
+
+            async sendTestPattern(rate) {
+                // Send a test pattern using the specified rate parameters
+                const testData = 'CALIBRATION_TEST_' + rate.name.toUpperCase();
+
+                // Temporarily override config for this test
+                const originalConfig = { ...this.config };
+                this.config.TONE_DURATION = rate.duration;
+                this.config.INTER_SYMBOL_DELAY = rate.delay;
+
+                this.updateStatus(`🔧 Calibrating: Testing ${rate.name} rate...`);
+
+                // Send test pattern
+                await this.transmitText(testData);
+
+                // Restore original config
+                this.config = originalConfig;
+            }
+
+            async waitForAck(expectedRate) {
+                return new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        reject(new Error(`Timeout waiting for ${expectedRate} ACK`));
+                    }, 5000); // 5 second timeout
+
+                    // Set up one-time handler for ACK
+                    const originalHandleTone = this.handleTone;
+                    this.handleTone = (tone) => {
+                        if (tone.freq === this.tones.ACK) {
+                            clearTimeout(timeout);
+                            this.handleTone = originalHandleTone; // Restore original handler
+                            this.updateStatus(`✅ ${expectedRate} rate calibrated successfully`);
+                            resolve();
+                        } else {
+                            // Pass other tones to original handler
+                            originalHandleTone.call(this, tone);
+                        }
+                    };
+                });
+            }
+
+            // Frequency Band Testing Methods
+            async measureBackgroundNoise(band) {
+                return new Promise((resolve) => {
+                    if (!this.audioContext) this.init();
+
+                    // Create analyzer node
+                    const analyser = this.audioContext.createAnalyser();
+                    analyser.fftSize = 2048;
+                    analyser.smoothingTimeConstant = 0.8;
+
+                    // Get microphone input
+                    navigator.mediaDevices.getUserMedia({ audio: true })
+                        .then(stream => {
+                            const source = this.audioContext.createMediaStreamSource(stream);
+                            source.connect(analyser);
+
+                            // Collect samples over 1 second
+                            const samples = [];
+                            const sampleInterval = setInterval(() => {
+                                const bufferLength = analyser.frequencyBinCount;
+                                const dataArray = new Uint8Array(bufferLength);
+                                analyser.getByteFrequencyData(dataArray);
+
+                                // Calculate average power in the band
+                                const nyquist = this.audioContext.sampleRate / 2;
+                                const startBin = Math.floor((band.start / nyquist) * bufferLength);
+                                const endBin = Math.floor((band.end / nyquist) * bufferLength);
+
+                                let sum = 0;
+                                let count = 0;
+                                for (let i = startBin; i <= endBin && i < bufferLength; i++) {
+                                    sum += dataArray[i];
+                                    count++;
+                                }
+
+                                if (count > 0) {
+                                    samples.push(sum / count);
+                                }
+                            }, 100); // Sample every 100ms
+
+                            // Stop after 1 second
+                            setTimeout(() => {
+                                clearInterval(sampleInterval);
+                                stream.getTracks().forEach(track => track.stop());
+
+                                // Return average noise level
+                                const avgNoise = samples.length > 0 ?
+                                    samples.reduce((a, b) => a + b, 0) / samples.length : 0;
+                                resolve(avgNoise);
+                            }, 1000);
+                        })
+                        .catch(error => {
+                            console.warn('Could not access microphone for noise measurement:', error);
+                            resolve(0); // Return 0 if we can't measure
+                        });
+                });
+            }
+
+            async testSignalStrength(band) {
+                return new Promise(async (resolve) => {
+                    if (!this.audioContext) this.init();
+
+                    // Test frequency in the middle of the band
+                    const testFreq = (band.start + band.end) / 2;
+
+                    // Create analyzer for measuring response
+                    const analyser = this.audioContext.createAnalyser();
+                    analyser.fftSize = 2048;
+
+                    // Get microphone input
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        const source = this.audioContext.createMediaStreamSource(stream);
+                        source.connect(analyser);
+
+                        // Play test tone
+                        await this.playTone(testFreq, 500); // 500ms tone
+
+                        // Wait a bit for the tone to propagate
+                        await this.delay(100);
+
+                        // Measure response
+                        const bufferLength = analyser.frequencyBinCount;
+                        const dataArray = new Uint8Array(bufferLength);
+                        analyser.getByteFrequencyData(dataArray);
+
+                        // Find peak in the band
+                        const nyquist = this.audioContext.sampleRate / 2;
+                        const startBin = Math.floor((band.start / nyquist) * bufferLength);
+                        const endBin = Math.floor((band.end / nyquist) * bufferLength);
+
+                        let maxSignal = 0;
+                        for (let i = startBin; i <= endBin && i < bufferLength; i++) {
+                            maxSignal = Math.max(maxSignal, dataArray[i]);
+                        }
+
+                        stream.getTracks().forEach(track => track.stop());
+                        resolve(maxSignal);
+
+                    } catch (error) {
+                        console.warn('Could not test signal strength:', error);
+                        resolve(0);
+                    }
+                });
+            }
+
+            async findBestBand() {
+                this.updateStatus('🔍 Testing frequency bands for optimal performance...');
+
+                for (let band of this.frequencyBands) {
+                    this.updateStatus(`📡 Testing ${band.name} band (${band.start}-${band.end}Hz)...`);
+
+                    const noise = await this.measureBackgroundNoise(band);
+                    const signal = await this.testSignalStrength(band);
+
+                    band.snr = signal / (noise + 1); // Signal-to-noise ratio (add 1 to avoid division by zero)
+                    band.noise = noise;
+                    band.signal = signal;
+                }
+
+                // Sort by SNR (best first)
+                this.frequencyBands.sort((a, b) => b.snr - a.snr);
+
+                const bestBand = this.frequencyBands[0];
+                this.updateStatus(`✅ Best band: ${bestBand.name} (${bestBand.start}-${bestBand.end}Hz, SNR: ${bestBand.snr.toFixed(2)})`);
+
+                return bestBand;
+            }
+
+            async transmitText(text) {
+                // Convert text to hex for transmission
+                const hexData = this.stringToHex(text);
+
+                // Send data length first (16 bits as hex)
+                const lengthHex = hexData.length.toString(16).padStart(4, '0');
+
+                // Use parallel channels if enabled
+                if (this.config.PARALLEL_CHANNELS === 2) {
+                    await this.transmitParallel(lengthHex);
+                    await this.transmitParallel(hexData);
+                } else {
+                    // Send length
+                    for (let i = 0; i < lengthHex.length; i++) {
+                        const hexChar = parseInt(lengthHex[i], 16);
+                        await this.playTone(this.dataFrequencies[hexChar], this.config.TONE_DURATION);
+                        await this.delay(this.config.INTER_SYMBOL_DELAY);
+                    }
+
+                    // Send data
+                    for (let i = 0; i < hexData.length; i++) {
+                        const hexChar = parseInt(hexData[i], 16);
+                        await this.playTone(this.dataFrequencies[hexChar], this.config.TONE_DURATION);
+                        await this.delay(this.config.INTER_SYMBOL_DELAY);
+                    }
+                }
+            }
         }
 
         // Initialize audio transfer with FastAudioProtocol optimizations
@@ -7800,6 +8565,16 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     <button onclick="audioProtocol.respondToHandshake(); this.closest('[style*=fixed]').remove();"
                             class="sync-button" style="width: 100%; margin-bottom: 10px; background: #2196F3;">
                         🎤 Receive (Phone)
+                    </button>
+
+                    <button onclick="audioProtocol.startReliableTransfer(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #FF9800;">
+                        🔄 Reliable Transfer (ACK Protocol)
+                    </button>
+
+                    <button onclick="audioProtocol.receiveWithAcks(); this.closest('[style*=fixed]').remove();"
+                            class="sync-button" style="width: 100%; margin-bottom: 10px; background: #9C27B0;">
+                        📥 Receive Reliable (ACK Protocol)
                     </button>
 
                     <div style="padding: 10px; background: #fff3e0; border-radius: 5px; margin: 10px 0; font-size: 12px;">
