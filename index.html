@@ -9179,7 +9179,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 return map;
             }
 
-            // Student side: Generate initial handshake QR
+            // Fixed student sync start
             startStudentSync() {
                 const userAnswers = classData.users[currentUsername]?.answers || {};
                 const answerCount = Object.keys(userAnswers).length;
@@ -9192,8 +9192,60 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     timestamp: Date.now()
                 };
 
-                this.showStudentQR(handshake, 'initial');
-                this.waitForSyncCode();
+                // Show QR first
+                const modal = document.createElement('div');
+                modal.id = 'student-sync-display';
+                modal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 9999; padding: 20px;';
+                modal.innerHTML = `
+                    <div style="max-width: 500px; margin: 0 auto; text-align: center;">
+                        <h2>Step 1: Show this QR to teacher</h2>
+                        <div id="student-qr" style="margin: 20px auto;"></div>
+                        <div style="padding: 20px; background: #f0f0f0; border-radius: 8px;">
+                            <p>After teacher scans this, they will give you a code</p>
+                            <input type="text"
+                                   id="teacher-code"
+                                   maxlength="6"
+                                   style="font-size: 36px;
+                                          letter-spacing: 8px;
+                                          text-align: center;
+                                          width: 300px;
+                                          text-transform: uppercase;
+                                          margin: 10px 0;"
+                                   placeholder="------"
+                                   onkeyup="this.value = this.value.toUpperCase()">
+                            <br>
+                            <button onclick="qrKeyboard.processSyncCode()"
+                                    style="font-size: 20px; padding: 10px 30px; margin-top: 10px;">
+                                I've Entered The Code
+                            </button>
+                        </div>
+                        <button onclick="qrKeyboard.cancelStudentSync()"
+                                style="margin-top: 20px; padding: 10px 20px; background: #f44336; color: white; border: none; border-radius: 4px;">
+                            Cancel
+                        </button>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                // Generate QR
+                new QRCode(document.getElementById('student-qr'), {
+                    text: JSON.stringify(handshake),
+                    width: 256,
+                    height: 256
+                });
+            }
+
+            // Add cancel methods
+            cancelStudentSync() {
+                document.getElementById('student-sync-display')?.remove();
+                document.onkeydown = null;
+            }
+
+            cancelTeacherSync() {
+                if (this.currentScanner) {
+                    this.currentScanner.stop();
+                }
+                document.getElementById('teacher-receive')?.remove();
             }
 
             // Student: Wait for teacher to type sync code
@@ -9390,6 +9442,39 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 this.startScanner();
             }
 
+            // Teacher: Initialize camera scanner
+            startScanner() {
+                const html5QrCode = new Html5Qrcode("scanner-area");
+
+                html5QrCode.start(
+                    { facingMode: "environment" },
+                    {
+                        fps: 10,
+                        qrbox: { width: 250, height: 250 }
+                    },
+                    (decodedText) => {
+                        this.processScannedQR(decodedText);
+                    }
+                ).catch(err => {
+                    // Try front camera if back camera fails
+                    html5QrCode.start(
+                        { facingMode: "user" },
+                        {
+                            fps: 10,
+                            qrbox: { width: 250, height: 250 }
+                        },
+                        (decodedText) => {
+                            this.processScannedQR(decodedText);
+                        }
+                    ).catch(err => {
+                        document.getElementById('sync-status').textContent =
+                            'Camera error. Please check permissions.';
+                    });
+                });
+
+                this.currentScanner = html5QrCode;
+            }
+
             // Teacher: Generate sync code for student
             generateSyncCode(username) {
                 const userInPhone = classData.users[username] || {};
@@ -9469,6 +9554,41 @@ if (chartInstances[`dotplot-${questionId}`]) {
             generateFinalCode() {
                 // Simple 5-char confirmation code
                 return 'DONE' + Math.floor(Math.random() * 10);
+            }
+
+            // Add to QRKeyboardSync class
+            mergeChunkData(chunkData) {
+                // Initialize user if doesn't exist
+                if (!classData.users[this.currentStudent]) {
+                    classData.users[this.currentStudent] = {
+                        answers: {},
+                        reasons: {},
+                        timestamps: {},
+                        attempts: {}
+                    };
+                }
+
+                // Merge the chunk
+                Object.keys(chunkData).forEach(qId => {
+                    const data = chunkData[qId];
+                    classData.users[this.currentStudent].answers[qId] = data.a;
+                    classData.users[this.currentStudent].reasons[qId] = data.r || '';
+                    classData.users[this.currentStudent].timestamps[qId] = data.t || Date.now();
+                });
+
+                // Save to localStorage
+                saveClassData();
+            }
+
+            resetForNext() {
+                // Reset for next student
+                this.currentStudent = null;
+                this.expectedChunks = 0;
+                this.receivedChunks = 0;
+                this.chunks = [];
+
+                document.getElementById('sync-code-display').style.display = 'none';
+                document.getElementById('sync-status').textContent = 'Ready for next student';
             }
         }
 
