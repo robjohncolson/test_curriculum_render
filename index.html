@@ -5625,6 +5625,21 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     document.getElementById('chunk-progress').innerHTML =
                         `✅ Success! Imported data from ${username}`;
 
+                    // After receiving all chunks, generate new state code to verify
+                    const newState = window.generateSyncCode(username);
+
+                    // This should now match what the student has
+                    document.getElementById('sync-code-display').textContent = newState;
+                    document.getElementById('sync-status').innerHTML = `
+                        <div style="padding: 20px; background: #c8e6c9;">
+                            <div>Transfer complete!</div>
+                            <div>New state code: <strong>${newState}</strong></div>
+                            <div style="margin-top: 10px; color: #666;">
+                                Student should verify this matches their state
+                            </div>
+                        </div>
+                    `;
+
                     setTimeout(() => {
                         this.cancelReceive();
                         loadProgress();
@@ -6706,6 +6721,11 @@ if (chartInstances[`dotplot-${questionId}`]) {
         // Add button to start smart sync
         window.startSmartSync = function() {
             smartSync.initiate();
+        }
+
+        // Make generateSyncCode globally accessible for chunked transfer verification
+        window.generateSyncCode = function(username) {
+            return smartSync.generateSyncCode(username);
         }
 
         // Text Code Transfer System (No Camera Required on Desktop)
@@ -9181,15 +9201,16 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
             // Fixed student sync start
             startStudentSync() {
-                const userAnswers = classData.users[currentUsername]?.answers || {};
-                const answerCount = Object.keys(userAnswers).length;
+                const userState = classData.users[currentUsername] || {};
+                const questionIds = Object.keys(userState.answers || {});
 
-                // Initial packet
                 const handshake = {
                     type: 'INIT',
                     user: currentUsername,
-                    count: answerCount,
-                    timestamp: Date.now()
+                    state: this.generateSyncCode(currentUsername), // Their state fingerprint
+                    count: questionIds.length,
+                    newest: Math.max(...Object.values(userState.timestamps || {}), 0),
+                    oldest: Math.min(...Object.values(userState.timestamps || {}), 0)
                 };
 
                 // Show QR first
@@ -9613,20 +9634,37 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 const answers = userInPhone.answers || {};
                 const timestamps = userInPhone.timestamps || {};
 
-                // Get most recent timestamp
-                let mostRecent = 0;
-                Object.values(timestamps).forEach(t => {
-                    if (t > mostRecent) mostRecent = t;
+                // Create a sorted, deterministic representation of what we have
+                const stateItems = [];
+                Object.keys(answers).sort().forEach(qId => {
+                    // Include question ID and timestamp to create unique signature
+                    const shortId = qId.replace(/.*-/, '').substring(0, 4);
+                    const ts = Math.floor((timestamps[qId] || 0) / 1000); // Seconds, not ms
+                    stateItems.push(`${shortId}:${ts}`);
                 });
 
-                // Create a 5-character code that encodes both count and recency
-                const count = Object.keys(answers).length;
-                const countCode = count.toString(36).padStart(2, '0').toUpperCase();
+                // Create a hash of the state
+                const stateString = stateItems.join(',');
+                let hash = 0;
+                for (let i = 0; i < stateString.length; i++) {
+                    const char = stateString.charCodeAt(i);
+                    hash = ((hash << 5) - hash) + char;
+                    hash = hash & hash; // Convert to 32-bit integer
+                }
 
-                // Use last 3 digits of timestamp for uniqueness
-                const timeCode = (mostRecent % 46656).toString(36).padStart(3, '0').toUpperCase();
+                // Convert to 6-digit numeric code (easier to type)
+                const code = Math.abs(hash % 1000000).toString().padStart(6, '0');
 
-                return countCode + timeCode;
+                // Store the actual state for comparison
+                this.syncStates = this.syncStates || {};
+                this.syncStates[code] = {
+                    username: username,
+                    questions: Object.keys(answers),
+                    timestamps: timestamps,
+                    generated: Date.now()
+                };
+
+                return code;
             }
 
             // Decode sync code
@@ -9644,19 +9682,43 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     // INIT: First QR from student
                     if (parsed.type === 'INIT') {
                         this.currentStudent = parsed.user;
+
+                        // Generate teacher's state for this student
+                        const teacherState = this.generateSyncCode(parsed.user);
+
+                        // Check if states match
+                        if (parsed.state === teacherState) {
+                            // States identical - no sync needed!
+                            document.getElementById('sync-status').innerHTML = `
+                                <div style="padding: 20px; background: #c8e6c9; border-radius: 8px;">
+                                    <div style="font-size: 24px;">✅ Already in sync!</div>
+                                    <div>Student: ${parsed.user}</div>
+                                    <div>No new data to transfer</div>
+                                    <button onclick="qrKeyboard.finishAlreadyInSync()"
+                                            style="margin-top: 15px; padding: 10px 30px;
+                                                   background: #4CAF50; color: white;
+                                                   border: none; border-radius: 5px;">
+                                        OK
+                                    </button>
+                                </div>
+                            `;
+                            return;
+                        }
+
+                        // Different states - proceed with sync
                         this.receivedChunks = 0;
                         this.expectedChunks = 0;
                         this.lastScannedData = null;
                         this.scannedChunks = new Set();
 
-                        const syncCode = this.generateSyncCode(parsed.user);
+                        const syncCode = teacherState;
 
                         // Pause scanner
                         if (this.currentScanner) {
                             this.currentScanner.pause();
                         }
 
-                        // Show code prominently
+                        // Show the teacher's state code
                         document.getElementById('sync-code-display').style.display = 'block';
                         document.getElementById('sync-code-display').textContent = syncCode;
 
@@ -10047,6 +10109,33 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 this.receivedChunks = 0;
                 this.expectedChunks = 0;
                 this.scannedChunks = new Set();
+            }
+
+            finishAlreadyInSync() {
+                // Stop the scanner
+                if (this.currentScanner) {
+                    this.currentScanner.stop();
+                }
+
+                // Show confirmation message
+                const modal = document.createElement('div');
+                modal.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 10000; display: flex; align-items: center; justify-content: center;';
+                modal.innerHTML = `
+                    <div style="background: white; padding: 30px; border-radius: 10px; text-align: center;">
+                        <div style="font-size: 48px; margin-bottom: 20px;">✅</div>
+                        <h2>Already In Sync!</h2>
+                        <p>No data transfer needed for:<br><strong>${this.currentStudent || 'student'}</strong></p>
+                        <button onclick="this.closest('[style*=fixed]').remove(); document.getElementById('teacher-receive')?.remove(); loadProgress();"
+                                style="margin-top: 20px; padding: 10px 30px; background: #4CAF50;
+                                       color: white; border: none; border-radius: 5px; font-size: 16px;">
+                            OK
+                        </button>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                // Reset for next sync
+                this.currentStudent = null;
             }
         }
 
