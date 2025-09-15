@@ -7439,43 +7439,61 @@ if (chartInstances[`dotplot-${questionId}`]) {
             async handleTone(tone) {
                 if (this.role !== 'receiver') return;
 
-                // Detect start pattern
+                // Add noise floor filtering
+                if (tone.strength < 100) return; // Ignore weak signals
+
+                // Detect start pattern (be more lenient with frequency detection)
                 if (this.state === 'waiting_for_sender') {
-                    if (tone.freq >= 2900 && tone.freq <= 3100) {
+                    if (Math.abs(tone.freq - 3000) < 150) { // Within 150Hz of 3000
                         this.state = 'receiving_header';
                         this.headerBuffer = '';
                         this.updateStatus('📥 Receiving header...');
+                        console.log('Start pattern detected');
                     }
                 }
 
                 // Receive length header
                 else if (this.state === 'receiving_header') {
-                    if (tone.freq >= 3000 && tone.freq <= 4500) {
+                    if (tone.freq >= 2900 && tone.freq <= 4600) {
                         const hexVal = Math.round((tone.freq - 3000) / 100);
-                        this.headerBuffer += hexVal.toString(16);
+                        if (hexVal >= 0 && hexVal <= 15) { // Valid hex digit
+                            this.headerBuffer += hexVal.toString(16);
+                            console.log('Header byte:', hexVal.toString(16), 'Total:', this.headerBuffer);
 
-                        if (this.headerBuffer.length === 4) {
-                            this.expectedLength = parseInt(this.headerBuffer, 16);
-                            this.dataBuffer = '';
-                            this.state = 'receiving_data';
-                            this.updateStatus(`📥 Expecting ${this.expectedLength} bytes...`);
+                            if (this.headerBuffer.length === 4) {
+                                this.expectedLength = parseInt(this.headerBuffer, 16);
+                                this.dataBuffer = '';
+                                this.state = 'receiving_data';
+                                this.updateStatus(`📥 Expecting ${this.expectedLength} bytes...`);
+                                console.log('Expected data length:', this.expectedLength);
+                            }
                         }
                     }
                 }
 
                 // Receive data
                 else if (this.state === 'receiving_data') {
-                    if (tone.freq >= 3000 && tone.freq <= 4500) {
+                    if (tone.freq >= 2900 && tone.freq <= 4600) {
                         const hexVal = Math.round((tone.freq - 3000) / 100);
-                        this.dataBuffer += hexVal.toString(16);
+                        if (hexVal >= 0 && hexVal <= 15) { // Valid hex digit
+                            this.dataBuffer += hexVal.toString(16);
 
-                        if (this.dataBuffer.length % 32 === 0) {
-                            this.updateStatus(`📥 Received ${this.dataBuffer.length}/${this.expectedLength}`);
-                        }
+                            if (this.dataBuffer.length % 32 === 0) {
+                                const percent = Math.round(this.dataBuffer.length * 100 / this.expectedLength);
+                                this.updateStatus(`📥 Received ${percent}%`);
+                            }
 
-                        if (this.dataBuffer.length >= this.expectedLength) {
-                            this.processReceivedData();
+                            if (this.dataBuffer.length >= this.expectedLength) {
+                                console.log('All data received, processing...');
+                                this.processReceivedData();
+                            }
                         }
+                    }
+
+                    // Detect end pattern (optional safety)
+                    if (Math.abs(tone.freq - 4000) < 150 && this.dataBuffer.length > 0) {
+                        console.log('End pattern detected, forcing process');
+                        this.processReceivedData();
                     }
                 }
             }
@@ -7554,10 +7572,12 @@ if (chartInstances[`dotplot-${questionId}`]) {
             }
 
             async transmitDataReliable() {
-                // Prepare minimal data packet
+                // Prepare minimal data packet with sequence number
                 const data = {
                     u: currentUsername.substring(0, 10),
-                    a: {}
+                    a: {},
+                    seq: this.lastSequenceNumber || 0, // Add sequence number for retransmission tracking
+                    t: Date.now() // Add timestamp for uniqueness
                 };
 
                 const answers = classData.users[currentUsername]?.answers || {};
@@ -7571,42 +7591,139 @@ if (chartInstances[`dotplot-${questionId}`]) {
                 const json = JSON.stringify(data);
                 const hexData = this.stringToHex(json);
 
-                // Send with simple protocol
-                this.updateStatus('📡 Sending header...');
-
-                // Send start pattern
-                await this.playTone(3000, 100);
-                await this.playTone(3500, 100);
-                await this.playTone(4000, 100);
-
-                // Send length (4 hex digits)
-                const lengthHex = hexData.length.toString(16).padStart(4, '0');
-                for (let char of lengthHex) {
-                    const freq = 3000 + (parseInt(char, 16) * 100);
-                    await this.playTone(freq, 50);
-                    await this.delay(25);
+                // Validate data before transmission
+                if (!json || json.length === 0) {
+                    throw new Error('No data to transmit');
                 }
 
-                // Send data
-                for (let i = 0; i < hexData.length; i++) {
-                    const hexChar = parseInt(hexData[i], 16);
-                    const freq = 3000 + (hexChar * 100);
-                    await this.playTone(freq, 50);
-                    await this.delay(25);
+                if (hexData.length > 10000) { // Reasonable limit to prevent extremely long transmissions
+                    throw new Error('Data too large for reliable transmission');
+                }
 
-                    if (i % 16 === 0) {
-                        this.updateStatus(`📤 Sending: ${Math.round(i * 100 / hexData.length)}%`);
+                // Calculate CRC8 checksum for error detection
+                const checksum = crc8(json);
+                const checksumHex = checksum.toString(16).padStart(2, '0');
+                console.log('Data checksum:', checksumHex, 'Data length:', json.length, 'Hex length:', hexData.length);
+
+                this.lastSequenceNumber = (this.lastSequenceNumber || 0) + 1;
+
+                // Retry mechanism for failed transmissions
+                const maxRetries = 3;
+                let retryCount = 0;
+                let transmissionSuccess = false;
+
+                while (!transmissionSuccess && retryCount < maxRetries) {
+                    try {
+                        await this.sendDataWithErrorRecovery(hexData, checksumHex, retryCount);
+                        transmissionSuccess = true;
+                        console.log(`✅ Transmission successful on attempt ${retryCount + 1}/${maxRetries}`);
+
+                        // Log successful transmission details
+                        console.log('Transmission summary:', {
+                            sequenceNumber: data.seq,
+                            dataLength: json.length,
+                            hexLength: hexData.length,
+                            checksum: checksumHex,
+                            attempts: retryCount + 1
+                        });
+
+                    } catch (error) {
+                        retryCount++;
+                        console.warn(`❌ Transmission attempt ${retryCount} failed:`, error.message);
+                        if (retryCount < maxRetries) {
+                            this.updateStatus(`⚠️ Retry ${retryCount}/${maxRetries} in 2s...`);
+                            await this.delay(2000); // Wait before retry
+                        } else {
+                            console.error('🚫 Transmission failed after all retries:', {
+                                totalAttempts: maxRetries,
+                                finalError: error.message,
+                                sequenceNumber: data.seq
+                            });
+                            this.updateStatus('❌ Transmission failed after all retries');
+                            throw new Error(`Transmission failed after ${maxRetries} attempts: ${error.message}`);
+                        }
                     }
                 }
-
-                // Send end pattern
-                await this.playTone(4000, 100);
-                await this.playTone(3500, 100);
-                await this.playTone(3000, 100);
 
                 this.updateStatus('✅ Transmission complete!');
 
                 setTimeout(() => this.complete(), 2000);
+            }
+
+            // Helper method for sending data with error recovery
+            async sendDataWithErrorRecovery(hexData, checksumHex, retryAttempt) {
+                try {
+                    // Add retry indicator to status for retries
+                    const retryPrefix = retryAttempt > 0 ? `🔄 Retry ${retryAttempt}: ` : '';
+
+                    this.updateStatus(`${retryPrefix}📡 Sending header...`);
+
+                    // Send start pattern (with retry indicator)
+                    if (retryAttempt > 0) {
+                        await this.playTone(4500, 150); // Different start pattern for retries
+                        await this.delay(100);
+                    }
+
+                    await this.playTone(3000, 100);
+                    await this.playTone(3500, 100);
+                    await this.playTone(4000, 100);
+
+                    // Send length (4 hex digits)
+                    const lengthHex = hexData.length.toString(16).padStart(4, '0');
+                    console.log(`${retryPrefix}Sending length:`, lengthHex);
+
+                    for (let char of lengthHex) {
+                        const freq = 3000 + (parseInt(char, 16) * 100);
+                        await this.playTone(freq, 50);
+                        await this.delay(25);
+                    }
+
+                    await this.delay(100); // Pause between header and data
+
+                    // Send data with error detection
+                    for (let i = 0; i < hexData.length; i++) {
+                        const hexChar = parseInt(hexData[i], 16);
+                        const freq = 3000 + (hexChar * 100);
+                        await this.playTone(freq, 50);
+                        await this.delay(25);
+
+                        if (i % 16 === 0) {
+                            this.updateStatus(`${retryPrefix}📤 Sending: ${Math.round(i * 100 / hexData.length)}%`);
+                        }
+
+                        // Add periodic sync pauses (more frequent on retries)
+                        const syncInterval = retryAttempt > 0 ? 16 : 32;
+                        if (i % syncInterval === syncInterval - 1) {
+                            await this.delay(100); // Sync pause
+                        }
+                    }
+
+                    // Send checksum after data
+                    this.updateStatus(`${retryPrefix}🔒 Sending checksum...`);
+                    await this.delay(100); // Pause before checksum
+
+                    for (let char of checksumHex) {
+                        const freq = 3000 + (parseInt(char, 16) * 100);
+                        await this.playTone(freq, 70); // Slightly longer for checksum
+                        await this.delay(30);
+                    }
+
+                    // Send end pattern
+                    await this.playTone(4000, 100);
+                    await this.playTone(3500, 100);
+                    await this.playTone(3000, 100);
+
+                } catch (error) {
+                    console.error(`Transmission error on attempt ${retryAttempt + 1}:`, error.message);
+                    // Log transmission details for debugging
+                    console.error('Transmission details:', {
+                        attempt: retryAttempt + 1,
+                        dataLength: hexData.length,
+                        checksum: checksumHex,
+                        error: error.message
+                    });
+                    throw error; // Re-throw to trigger retry mechanism
+                }
             }
 
             async transmitDataFast() {
@@ -7961,22 +8078,57 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
             // Process complete received data
             processReceivedData() {
-                // Sort blocks by sequence and combine
-                const sortedBlocks = Array.from(this.receivedBlocks.entries())
-                    .sort((a, b) => a[0] - b[0])
-                    .map(([seq, data]) => data);
+    try {
+        console.log('Processing received data:', this.dataBuffer);
 
-                const completeData = sortedBlocks.join('');
-                this.updateStatus(`✅ Reception complete: ${completeData.length} hex chars received`);
+        // Convert hex back to string
+        const decoded = this.hexToString(this.dataBuffer);
+        console.log('Decoded string:', decoded);
 
-                // Here you would typically decode and process the complete data
-                // For now, just log it
-                console.log('Received complete data:', completeData);
+        const data = JSON.parse(decoded);
+        console.log('Parsed data:', data);
 
-                // Clean up
-                this.receivedBlocks = null;
-                this.nextExpectedSequence = 0;
+        // Import the data
+        if (data && data.u && data.a) {
+            const imported = {
+                users: {
+                    [data.u]: {
+                        answers: data.a,
+                        timestamps: {},
+                        reasons: {},
+                        attempts: {}
+                    }
+                }
+            };
+
+            mergeClassData(imported);
+            this.updateStatus(`✅ Received data from ${data.u}!`);
+
+            setTimeout(() => this.complete(), 2000);
+        } else {
+            throw new Error('Invalid data structure');
+        }
+
+    } catch(err) {
+        console.error('Data processing error:', err);
+        console.error('Raw buffer:', this.dataBuffer);
+        console.error('Buffer length:', this.dataBuffer.length);
+        console.error('Expected length:', this.expectedLength);
+
+        this.updateStatus(`❌ Error: ${err.message}`);
+
+        // Try to salvage partial data
+        if (this.dataBuffer.length > 0) {
+            try {
+                // Try decoding what we have
+                const partial = this.hexToString(this.dataBuffer.substring(0, Math.floor(this.dataBuffer.length / 2) * 2));
+                console.log('Partial decode attempt:', partial);
+            } catch(e) {
+                console.error('Could not decode partial data');
             }
+        }
+    }
+}
 
             // Start a reliable transfer using the bidirectional ACK protocol
             async startReliableTransfer() {
@@ -8378,10 +8530,41 @@ if (chartInstances[`dotplot-${questionId}`]) {
             }
 
             hexToString(hex) {
-                let str = '';
-                for (let i = 0; i < hex.length; i += 2) {
-                    str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+                // Debug: Log input
+                console.log('hexToString input:', hex);
+
+                // Clean the hex string first
+                const originalHex = hex;
+                hex = hex.replace(/[^0-9a-fA-F]/g, '');
+                console.log('hexToString cleaned hex:', hex, '(original length:', originalHex.length, ', cleaned length:', hex.length + ')');
+
+                // Ensure even length
+                if (hex.length % 2 !== 0) {
+                    console.warn('hexToString: Odd length hex string, truncating:', hex.length);
+                    hex = hex.substring(0, hex.length - 1);
+                    console.log('hexToString: After truncation:', hex);
                 }
+
+                let str = '';
+                console.log('hexToString: Processing', Math.floor(hex.length / 2), 'bytes');
+
+                for (let i = 0; i < hex.length; i += 2) {
+                    const byte = hex.substr(i, 2);
+                    const charCode = parseInt(byte, 16);
+
+                    // Debug: Log each byte conversion
+                    console.log('hexToString: Byte', byte, '-> charCode', charCode);
+
+                    // Validate character code
+                    if (charCode > 0 && charCode < 128) { // ASCII range
+                        str += String.fromCharCode(charCode);
+                        console.log('hexToString: Added character:', String.fromCharCode(charCode));
+                    } else {
+                        console.warn('hexToString: Invalid char code:', charCode, 'from byte:', byte, '- skipping');
+                    }
+                }
+
+                console.log('hexToString: Final result:', str, '(length:', str.length + ')');
                 return str;
             }
 
