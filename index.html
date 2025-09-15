@@ -7683,6 +7683,7 @@ if (chartInstances[`dotplot-${questionId}`]) {
                         this.updateStatus(`Sending: ${Math.round(i * 100 / hexData.length)}%`);
                     }
                 }
+            }
 
             // Progressive Fallback Strategy - Start optimistic, fall back gracefully
             async smartTransmit(data) {

@@ -1,5 +1,5 @@
 // Export the EMBEDDED_CURRICULUM data
-const EMBEDDED_CURRICULUM = [
+var EMBEDDED_CURRICULUM = [
 
     {
       "id": "U1-L2-Q01",
