@@ -9286,6 +9286,9 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     return;
                 }
 
+                // Close the initial modal
+                document.getElementById('student-sync-display')?.remove();
+
                 // Decode what teacher has
                 const teacherState = this.decodeSyncCode(code);
                 const myAnswers = classData.users[currentUsername]?.answers || {};
@@ -9299,8 +9302,17 @@ if (chartInstances[`dotplot-${questionId}`]) {
                     }
                 });
 
-                // Prepare chunks
+                // Prepare chunks and show first QR
                 this.prepareChunks(toSend);
+
+                // Show chunk count info, then immediately show first data QR
+                if (this.chunks.length > 0) {
+                    this.currentChunk = 0;
+                    this.showStudentQR(null, 'data');
+                } else {
+                    alert('No new data to send!');
+                    this.cancelStudentSync();
+                }
             }
 
             // Student: Prepare data chunks
@@ -9325,60 +9337,82 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                 this.chunks = chunks;
                 this.currentChunk = 0;
-
-                // Send chunk count QR
-                this.showStudentQR({
-                    type: 'CHUNKS',
-                    count: chunks.length,
-                    user: currentUsername
-                }, 'chunk-count');
             }
 
             // Student: Show QR and wait for spacebar
             showStudentQR(data, stage) {
-                const qrModal = document.getElementById('qr-display') || document.createElement('div');
-                qrModal.id = 'qr-display';
+                let qrModal = document.getElementById('qr-display');
+
+                // Create or update modal
+                if (!qrModal) {
+                    qrModal = document.createElement('div');
+                    qrModal.id = 'qr-display';
+                    document.body.appendChild(qrModal);
+                }
 
                 let instruction = '';
+                let qrData = data; // Default to passed data
+
                 if (stage === 'initial') {
                     instruction = 'Show this to teacher';
                 } else if (stage === 'chunk-count') {
                     instruction = `Will send ${this.chunks.length} QR codes. Press SPACE to show first.`;
+                    // After showing chunk count, automatically move to first data chunk
+                    setTimeout(() => {
+                        this.currentChunk = 0;
+                        this.showStudentQR(null, 'data');
+                    }, 1000);
+                    return; // Don't generate QR for chunk-count stage
                 } else if (stage === 'data') {
-                    instruction = `QR ${this.currentChunk + 1} of ${this.chunks.length}. Teacher will scan, then press SPACE.`;
+                    // This is where the bug was - need to actually get the chunk data
+                    if (this.chunks && this.currentChunk < this.chunks.length) {
+                        instruction = `QR ${this.currentChunk + 1} of ${this.chunks.length}. Teacher scans, then press SPACE.`;
+                        qrData = {
+                            type: 'DATA',
+                            chunk: this.currentChunk,
+                            data: this.chunks[this.currentChunk],
+                            user: currentUsername
+                        };
+                    } else {
+                        console.error('No chunks available or chunk index out of range');
+                        return;
+                    }
                 } else if (stage === 'final') {
                     instruction = 'Final confirmation QR';
                 }
 
+                qrModal.style.cssText = 'position: fixed; inset: 0; background: white; z-index: 9999;';
                 qrModal.innerHTML = `
-                    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-                                background: white; z-index: 9999;
-                                display: flex; align-items: center; justify-content: center;">
+                    <div style="display: flex; align-items: center; justify-content: center; height: 100%;">
                         <div style="text-align: center;">
                             <h2>${instruction}</h2>
-                            <div id="student-qr" style="margin: 20px auto;"></div>
-                            <div style="font-size: 24px; margin-top: 20px;">
-                                ${stage === 'data' ? `Progress: ${this.currentChunk + 1}/${this.chunks.length}` : ''}
+                            <div id="student-qr-display" style="margin: 20px auto;"></div>
+                            <div style="font-size: 24px; margin-top: 20px; padding: 20px; background: #f0f0f0; border-radius: 8px;">
+                                ${stage === 'data' ? `
+                                    <div>Progress: ${this.currentChunk + 1}/${this.chunks.length}</div>
+                                    <div style="margin-top: 10px; color: #2196F3;">Press SPACEBAR for next QR</div>
+                                ` : ''}
                             </div>
+                            <button onclick="qrKeyboard.cancelStudentSync()"
+                                    style="margin-top: 20px; padding: 10px 20px; background: #f44336; color: white; border: none; border-radius: 4px;">
+                                Cancel
+                            </button>
                         </div>
                     </div>
                 `;
 
-                document.body.appendChild(qrModal);
+                // Generate QR code
+                if (qrData) {
+                    new QRCode(document.getElementById('student-qr-display'), {
+                        text: JSON.stringify(qrData),
+                        width: 300,
+                        height: 300,
+                        correctLevel: QRCode.CorrectLevel.L
+                    });
+                }
 
-                // Generate QR
-                const qrData = stage === 'data' ?
-                    { type: 'DATA', chunk: this.currentChunk, data: this.chunks[this.currentChunk] } :
-                    data;
-
-                new QRCode(document.getElementById('student-qr'), {
-                    text: JSON.stringify(qrData),
-                    width: 300,
-                    height: 300
-                });
-
-                // Spacebar handler
-                if (stage === 'chunk-count' || stage === 'data') {
+                // Set up spacebar handler for data chunks
+                if (stage === 'data') {
                     document.onkeydown = (e) => {
                         if (e.code === 'Space') {
                             e.preventDefault();
@@ -9390,11 +9424,14 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
             // Student: Move to next chunk
             nextChunk() {
+                this.currentChunk++;
+
                 if (this.currentChunk < this.chunks.length) {
+                    // Show next chunk
                     this.showStudentQR(null, 'data');
-                    this.currentChunk++;
                 } else {
                     // All chunks sent, wait for final code
+                    document.onkeydown = null; // Remove spacebar handler
                     this.waitForFinalCode();
                 }
             }
