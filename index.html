@@ -9730,19 +9730,27 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
                         // Check if done
                         if (this.receivedChunks >= this.expectedChunks) {
-                            // Generate final code
+                            // Generate and show final code
                             const finalCode = this.generateFinalCode();
-
                             document.getElementById('sync-code-display').style.display = 'block';
                             document.getElementById('sync-code-display').textContent = finalCode;
                             document.getElementById('sync-code-display').style.background = '#4CAF50';
                             document.getElementById('sync-code-display').style.color = 'white';
 
+                            // Resume scanning for confirmation
+                            setTimeout(() => {
+                                if (this.currentScanner) {
+                                    this.currentScanner.resume();
+                                }
+                            }, 1000); // Give a second for the code to be visible first
+
                             document.getElementById('sync-status').innerHTML = `
                                 <div style="padding: 20px; background: #c8e6c9; border-radius: 8px;">
                                     <div style="font-size: 24px;">✅ All Done!</div>
-                                    <div>Received ${this.receivedChunks} QRs</div>
-                                    <div style="margin-top: 10px;">Give student code above ☝️</div>
+                                    <div>Give student code above ☝️</div>
+                                    <div style="margin-top: 10px; color: #666;">
+                                        Then scan their confirmation QR to complete
+                                    </div>
                                 </div>
                             `;
                         } else {
@@ -9767,6 +9775,32 @@ if (chartInstances[`dotplot-${questionId}`]) {
                                 </div>
                             `;
                         }
+
+                        return;
+                    }
+
+                    // CONFIRM: Final confirmation from student
+                    if (parsed.type === 'CONFIRM') {
+                        // Final confirmation from student
+                        document.getElementById('sync-status').innerHTML = `
+                            <div style="padding: 20px; background: #4CAF50; border-radius: 8px;">
+                                <div style="font-size: 24px; color: white;">✅ Sync Verified!</div>
+                                <div style="color: white;">Student ${parsed.user} confirmed successful sync</div>
+                                <div style="margin-top: 15px;">
+                                    <button onclick="qrKeyboard.resetForNext()"
+                                            style="padding: 10px 20px; background: white; color: #4CAF50;
+                                                   border: none; border-radius: 5px; font-size: 16px;">
+                                        Ready for Next Student
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+
+                        // Hide any codes still showing
+                        document.getElementById('sync-code-display').style.display = 'none';
+
+                        // Log the successful sync
+                        console.log(`Sync completed and verified with ${parsed.user} at ${new Date(parsed.timestamp)}`);
 
                         return;
                     }
