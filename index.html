@@ -9147,6 +9147,325 @@ if (chartInstances[`dotplot-${questionId}`]) {
 
             document.body.appendChild(modal);
         }
+
+        // QR Keyboard Sync System
+        class QRKeyboardSync {
+            constructor() {
+                this.currentSession = null;
+                this.curriculum = window.EMBEDDED_CURRICULUM?.questions || [];
+                this.questionMap = this.buildQuestionMap();
+            }
+
+            // Build efficient question ID mapping
+            buildQuestionMap() {
+                const map = {};
+                this.curriculum.forEach((q, index) => {
+                    // Use last 3-4 chars of ID as short code
+                    const shortId = q.id.replace(/^.*-/, '').substring(0, 4);
+                    map[shortId] = index;
+                });
+                return map;
+            }
+
+            // Student side: Generate initial handshake QR
+            startStudentSync() {
+                const userAnswers = classData.users[currentUsername]?.answers || {};
+                const answerCount = Object.keys(userAnswers).length;
+
+                // Initial packet
+                const handshake = {
+                    type: 'INIT',
+                    user: currentUsername,
+                    count: answerCount,
+                    timestamp: Date.now()
+                };
+
+                this.showStudentQR(handshake, 'initial');
+                this.waitForSyncCode();
+            }
+
+            // Student: Wait for teacher to type sync code
+            waitForSyncCode() {
+                const modal = document.createElement('div');
+                modal.id = 'sync-code-input';
+                modal.innerHTML = `
+                    <div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                                background: white; padding: 30px; border-radius: 10px; z-index: 9999;
+                                box-shadow: 0 4px 20px rgba(0,0,0,0.3);">
+                        <h2>Teacher will give you a code</h2>
+                        <input type="text"
+                               id="teacher-code"
+                               maxlength="6"
+                               style="font-size: 36px;
+                                      letter-spacing: 8px;
+                                      text-align: center;
+                                      width: 300px;
+                                      text-transform: uppercase;"
+                               placeholder="------"
+                               onkeyup="this.value = this.value.toUpperCase()">
+                        <br><br>
+                        <button onclick="qrKeyboard.processSyncCode()"
+                                style="font-size: 20px; padding: 10px 30px;">
+                            Process Code
+                        </button>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+                document.getElementById('teacher-code').focus();
+            }
+
+            // Student: Process teacher's sync code
+            processSyncCode() {
+                const code = document.getElementById('teacher-code').value;
+                if (code.length < 5) {
+                    alert('Code too short');
+                    return;
+                }
+
+                // Decode what teacher has
+                const teacherState = this.decodeSyncCode(code);
+                const myAnswers = classData.users[currentUsername]?.answers || {};
+
+                // Calculate what needs to be sent
+                const toSend = [];
+                Object.keys(myAnswers).forEach(qId => {
+                    const timestamp = classData.users[currentUsername].timestamps[qId];
+                    if (!teacherState[qId] || teacherState[qId] < timestamp) {
+                        toSend.push(qId);
+                    }
+                });
+
+                // Prepare chunks
+                this.prepareChunks(toSend);
+            }
+
+            // Student: Prepare data chunks
+            prepareChunks(questionIds) {
+                const CHUNK_SIZE = 10; // Questions per QR
+                const chunks = [];
+
+                for (let i = 0; i < questionIds.length; i += CHUNK_SIZE) {
+                    const chunkIds = questionIds.slice(i, i + CHUNK_SIZE);
+                    const chunkData = {};
+
+                    chunkIds.forEach(qId => {
+                        chunkData[qId] = {
+                            a: classData.users[currentUsername].answers[qId],
+                            r: classData.users[currentUsername].reasons[qId],
+                            t: classData.users[currentUsername].timestamps[qId]
+                        };
+                    });
+
+                    chunks.push(chunkData);
+                }
+
+                this.chunks = chunks;
+                this.currentChunk = 0;
+
+                // Send chunk count QR
+                this.showStudentQR({
+                    type: 'CHUNKS',
+                    count: chunks.length,
+                    user: currentUsername
+                }, 'chunk-count');
+            }
+
+            // Student: Show QR and wait for spacebar
+            showStudentQR(data, stage) {
+                const qrModal = document.getElementById('qr-display') || document.createElement('div');
+                qrModal.id = 'qr-display';
+
+                let instruction = '';
+                if (stage === 'initial') {
+                    instruction = 'Show this to teacher';
+                } else if (stage === 'chunk-count') {
+                    instruction = `Will send ${this.chunks.length} QR codes. Press SPACE to show first.`;
+                } else if (stage === 'data') {
+                    instruction = `QR ${this.currentChunk + 1} of ${this.chunks.length}. Teacher will scan, then press SPACE.`;
+                } else if (stage === 'final') {
+                    instruction = 'Final confirmation QR';
+                }
+
+                qrModal.innerHTML = `
+                    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+                                background: white; z-index: 9999;
+                                display: flex; align-items: center; justify-content: center;">
+                        <div style="text-align: center;">
+                            <h2>${instruction}</h2>
+                            <div id="student-qr" style="margin: 20px auto;"></div>
+                            <div style="font-size: 24px; margin-top: 20px;">
+                                ${stage === 'data' ? `Progress: ${this.currentChunk + 1}/${this.chunks.length}` : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                document.body.appendChild(qrModal);
+
+                // Generate QR
+                const qrData = stage === 'data' ?
+                    { type: 'DATA', chunk: this.currentChunk, data: this.chunks[this.currentChunk] } :
+                    data;
+
+                new QRCode(document.getElementById('student-qr'), {
+                    text: JSON.stringify(qrData),
+                    width: 300,
+                    height: 300
+                });
+
+                // Spacebar handler
+                if (stage === 'chunk-count' || stage === 'data') {
+                    document.onkeydown = (e) => {
+                        if (e.code === 'Space') {
+                            e.preventDefault();
+                            this.nextChunk();
+                        }
+                    };
+                }
+            }
+
+            // Student: Move to next chunk
+            nextChunk() {
+                if (this.currentChunk < this.chunks.length) {
+                    this.showStudentQR(null, 'data');
+                    this.currentChunk++;
+                } else {
+                    // All chunks sent, wait for final code
+                    this.waitForFinalCode();
+                }
+            }
+
+            // Student: Wait for final state code
+            waitForFinalCode() {
+                document.getElementById('qr-display').innerHTML = `
+                    <div style="position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                                background: white; padding: 30px; border-radius: 10px;">
+                        <h2>Enter Final Code from Teacher</h2>
+                        <input type="text"
+                               id="final-code"
+                               maxlength="5"
+                               style="font-size: 36px;
+                                      letter-spacing: 8px;
+                                      text-align: center;
+                                      width: 250px;
+                                      text-transform: uppercase;">
+                        <br><br>
+                        <button onclick="qrKeyboard.verifyFinalState()">Verify</button>
+                    </div>
+                `;
+            }
+
+            // Teacher side: Start receiving
+            startTeacherReceive() {
+                const modal = document.createElement('div');
+                modal.id = 'teacher-receive';
+                modal.innerHTML = `
+                    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+                                background: white; z-index: 9999; padding: 20px;">
+                        <h2>Teacher Sync Mode</h2>
+                        <div id="scanner-area" style="width: 100%; max-width: 400px; margin: 0 auto;"></div>
+                        <div id="sync-status" style="text-align: center; margin-top: 20px;">
+                            Ready to scan initial QR
+                        </div>
+                        <div id="sync-code-display" style="display: none; text-align: center; margin: 20px;
+                                                   font-size: 48px; letter-spacing: 10px;
+                                                   background: yellow; padding: 20px;"></div>
+                        <button onclick="qrKeyboard.cancelTeacherSync()">Cancel</button>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                this.startScanner();
+            }
+
+            // Teacher: Generate sync code for student
+            generateSyncCode(username) {
+                const userInPhone = classData.users[username] || {};
+                const answers = userInPhone.answers || {};
+
+                // Create a 5-character code representing what we have
+                // Format: 2 chars for count, 3 chars for checksum
+                const count = Object.keys(answers).length;
+                const countCode = count.toString(36).padStart(2, '0').toUpperCase();
+
+                // Simple checksum of question IDs
+                let checksum = 0;
+                Object.keys(answers).forEach(qId => {
+                    const shortId = qId.replace(/^.*-/, '');
+                    checksum += shortId.charCodeAt(0);
+                });
+                const checksumCode = (checksum % 46656).toString(36).padStart(3, '0').toUpperCase();
+
+                return countCode + checksumCode;
+            }
+
+            // Decode sync code
+            decodeSyncCode(code) {
+                const count = parseInt(code.substring(0, 2), 36);
+                // Return simplified state
+                return { expectedCount: count };
+            }
+
+            // Teacher: Process scanned QR
+            processScannedQR(data) {
+                const parsed = JSON.parse(data);
+
+                switch(parsed.type) {
+                    case 'INIT':
+                        // Show sync code for student
+                        const syncCode = this.generateSyncCode(parsed.user);
+                        document.getElementById('sync-code-display').style.display = 'block';
+                        document.getElementById('sync-code-display').textContent = syncCode;
+                        document.getElementById('sync-status').textContent =
+                            `Tell ${parsed.user} to type: ${syncCode}`;
+                        this.currentStudent = parsed.user;
+                        break;
+
+                    case 'CHUNKS':
+                        this.expectedChunks = parsed.count;
+                        this.receivedChunks = 0;
+                        document.getElementById('sync-status').textContent =
+                            `Ready to receive ${parsed.count} QR codes. Press button when ready.`;
+                        document.getElementById('sync-code-display').style.display = 'none';
+                        break;
+
+                    case 'DATA':
+                        this.receivedChunks++;
+                        // Process the chunk data
+                        this.mergeChunkData(parsed.data);
+                        document.getElementById('sync-status').textContent =
+                            `Received ${this.receivedChunks}/${this.expectedChunks}. Tell student to press SPACE.`;
+
+                        if (this.receivedChunks === this.expectedChunks) {
+                            // Generate final code
+                            const finalCode = this.generateFinalCode();
+                            document.getElementById('sync-code-display').style.display = 'block';
+                            document.getElementById('sync-code-display').textContent = finalCode;
+                            document.getElementById('sync-status').textContent =
+                                `Complete! Give student code: ${finalCode}`;
+                        }
+                        break;
+
+                    case 'CONFIRM':
+                        document.getElementById('sync-status').textContent =
+                            `✅ ${this.currentStudent} synced successfully!`;
+                        setTimeout(() => this.resetForNext(), 2000);
+                        break;
+                }
+            }
+
+            generateFinalCode() {
+                // Simple 5-char confirmation code
+                return 'DONE' + Math.floor(Math.random() * 10);
+            }
+        }
+
+        // Initialize
+        const qrKeyboard = new QRKeyboardSync();
+
+        // Add buttons to UI
+        window.startStudentQRKeyboard = () => qrKeyboard.startStudentSync();
+        window.startTeacherQRKeyboard = () => qrKeyboard.startTeacherReceive();
     </script>
 </body>
 </html>
