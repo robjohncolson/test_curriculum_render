@@ -1,6 +1,4 @@
-// Export the EMBEDDED_CURRICULUM data
-var EMBEDDED_CURRICULUM = [
-
+const EMBEDDED_CURRICULUM = [
     {
       "id": "U1-L2-Q01",
       "type": "multiple-choice",
@@ -37850,8 +37848,4 @@ var EMBEDDED_CURRICULUM = [
         ]
       }
     }
-  
-];
-
-// Make it available globally if needed
-window.EMBEDDED_CURRICULUM = EMBEDDED_CURRICULUM;
+  ]
