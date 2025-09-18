@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AP Stats Consensus Quiz - Hybrid Edition</title>
+
+    <!-- Chart.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+
+    <!-- MathJax -->
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" id="MathJax-script" async></script>
+
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="styles.css">
+
+    <!-- Additional Hybrid Styles -->
+    <style>
+        /* Authentication Styles */
+        .auth-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        }
+
+        .auth-box {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+        }
+
+        .auth-box h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        .auth-box p {
+            color: #666;
+            margin-bottom: 30px;
+        }
+
+        .google-signin-btn {
+            background: #4285f4;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            transition: background 0.3s;
+        }
+
+        .google-signin-btn:hover {
+            background: #357ae8;
+        }
+
+        /* Connection Status Styles */
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+            z-index: 1000;
+            transition: all 0.3s ease;
+        }
+
+        .connection-status.online {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .connection-status.local {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeeba;
+        }
+
+        .connection-status.offline {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        /* User Info Bar */
+        .user-info-bar {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: white;
+            padding: 8px 16px;
+            border-radius: 25px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+
+        .user-avatar {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            border: 2px solid #4285f4;
+        }
+
+        .user-name {
+            font-weight: 500;
+            color: #333;
+        }
+
+        .sign-out-btn {
+            background: #f44336;
+            color: white;
+            border: none;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .sign-out-btn:hover {
+            background: #d32f2f;
+        }
+
+        /* Local Hub Dialog */
+        .dialog-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+        }
+
+        .local-hub-dialog {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            max-width: 400px;
+            width: 90%;
+        }
+
+        .local-hub-dialog h3 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .local-hub-dialog input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+
+        .dialog-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+
+        .dialog-buttons button {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .dialog-buttons button:first-child {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .dialog-buttons button:last-child {
+            background: #f44336;
+            color: white;
+        }
+
+        /* Notification Styles */
+        .notification-message {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: white;
+            padding: 15px 25px;
+            border-radius: 5px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            z-index: 9000;
+            animation: slideUp 0.3s ease;
+        }
+
+        @keyframes slideUp {
+            from {
+                bottom: -100px;
+                opacity: 0;
+            }
+            to {
+                bottom: 20px;
+                opacity: 1;
+            }
+        }
+
+        .notification.warning {
+            background: #ff9800;
+        }
+
+        .notification.success {
+            background: #4CAF50;
+        }
+
+        .notification.error {
+            background: #f44336;
+        }
+
+        /* Peer Activity Indicator */
+        .peer-activity {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: white;
+            padding: 10px 15px;
+            border-radius: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .peer-activity .pulse {
+            width: 8px;
+            height: 8px;
+            background: #4CAF50;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7);
+            }
+            70% {
+                transform: scale(1);
+                box-shadow: 0 0 0 10px rgba(76, 175, 80, 0);
+            }
+            100% {
+                transform: scale(0.95);
+                box-shadow: 0 0 0 0 rgba(76, 175, 80, 0);
+            }
+        }
+
+        /* Hide main container until authenticated */
+        .container {
+            display: none;
+        }
+
+        .container.authenticated {
+            display: block;
+        }
+    </style>
+
+    <!-- Data Files -->
+    <script src="question.js"></script>
+    <script src="allUnitsData.js"></script>
+
+    <!-- Firebase Configuration -->
+    <script src="firebase-config.js"></script>
+
+    <!-- Hybrid Data Service -->
+    <script src="hybrid-data-service.js"></script>
+</head>
+<body>
+    <!-- Authentication Container -->
+    <div id="authContainer" class="auth-container">
+        <div class="auth-box">
+            <h2>🧮 AP Statistics Consensus Quiz</h2>
+            <p>Sign in to access your personalized learning experience</p>
+            <button class="google-signin-btn" onclick="signInWithGoogle()">
+                <svg width="18" height="18" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                    <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                </svg>
+                Sign in with Google
+            </button>
+        </div>
+    </div>
+
+    <!-- User Info Bar -->
+    <div id="userInfoBar" class="user-info-bar" style="display: none;">
+        <img id="userAvatar" class="user-avatar" src="" alt="User">
+        <span id="userName" class="user-name"></span>
+        <button class="sign-out-btn" onclick="signOut()">Sign Out</button>
+    </div>
+
+    <!-- Connection Status Indicator -->
+    <div id="connectionStatus" class="connection-status offline">
+        <span class="status-offline">📵 Offline</span>
+    </div>
+
+    <!-- Main Container (hidden until authenticated) -->
+    <div class="container" id="mainContainer">
+        <h1>🧮 AP Statistics Consensus Quiz</h1>
+        <div id="messageArea"></div>
+        <div id="questionsContainer"></div>
+    </div>
+
+    <!-- Peer Activity Indicator -->
+    <div id="peerActivity" class="peer-activity" style="display: none;">
+        <span class="pulse"></span>
+        <span id="peerCount">0 peers online</span>
+    </div>
+
+    <!-- Theme Toggle -->
+    <button class="theme-toggle" title="Toggle theme">🌙</button>
+
+    <script>
+    // ===============================================
+    // INITIALIZATION AND AUTHENTICATION
+    // ===============================================
+
+    let isInitialized = false;
+    let currentUser = null;
+
+    // Initialize app on load
+    window.addEventListener('DOMContentLoaded', async () => {
+        console.log('Initializing AP Stats Quiz - Hybrid Edition');
+
+        // Initialize Hybrid Data Service
+        await HybridDataService.initialize();
+
+        // Check if already authenticated
+        firebase.auth().onAuthStateChanged((user) => {
+            if (user) {
+                handleSuccessfulAuth(user);
+            } else {
+                showAuthScreen();
+            }
+        });
+
+        // Setup event listeners
+        setupEventListeners();
+
+        // Check for cached Local Hub IP
+        const cachedIP = localStorage.getItem('lastLocalHubIP');
+        if (cachedIP && HybridDataService.connectionMode === 'offline') {
+            setTimeout(() => {
+                if (confirm(`Connect to Local Hub at ${cachedIP}?`)) {
+                    HybridDataService.connectToLocalHub(cachedIP);
+                }
+            }, 1000);
+        }
+    });
+
+    // Sign in with Google
+    async function signInWithGoogle() {
+        try {
+            const user = await FirebaseConfig.signInWithGoogle();
+            console.log('Sign in successful:', user.displayName);
+        } catch (error) {
+            console.error('Sign in failed:', error);
+            alert('Sign in failed. Please try again.');
+        }
+    }
+
+    // Sign out
+    async function signOut() {
+        if (confirm('Are you sure you want to sign out?')) {
+            try {
+                await FirebaseConfig.signOut();
+                showAuthScreen();
+            } catch (error) {
+                console.error('Sign out failed:', error);
+            }
+        }
+    }
+
+    // Handle successful authentication
+    function handleSuccessfulAuth(user) {
+        currentUser = user;
+
+        // Hide auth screen
+        document.getElementById('authContainer').style.display = 'none';
+
+        // Show main container
+        document.getElementById('mainContainer').classList.add('authenticated');
+
+        // Update user info bar
+        const userInfoBar = document.getElementById('userInfoBar');
+        userInfoBar.style.display = 'flex';
+        document.getElementById('userAvatar').src = user.photoURL || '';
+        document.getElementById('userName').textContent = user.displayName || user.email;
+
+        // Initialize main app if not already done
+        if (!isInitialized) {
+            initializeMainApp();
+            isInitialized = true;
+        }
+    }
+
+    // Show authentication screen
+    function showAuthScreen() {
+        document.getElementById('authContainer').style.display = 'flex';
+        document.getElementById('mainContainer').classList.remove('authenticated');
+        document.getElementById('userInfoBar').style.display = 'none';
+    }
+
+    // ===============================================
+    // EVENT LISTENERS
+    // ===============================================
+
+    function setupEventListeners() {
+        // Connection mode changes
+        window.addEventListener('connectionModeChanged', (event) => {
+            console.log('Connection mode changed:', event.detail.mode);
+            updateUIForConnectionMode(event.detail.mode);
+        });
+
+        // Peer data updates
+        window.addEventListener('peerDataUpdated', (event) => {
+            console.log('Peer data updated:', event.detail);
+            updatePeerVisualization(event.detail.questionId);
+        });
+
+        // Active users updates
+        window.addEventListener('activeUsersUpdated', (event) => {
+            updatePeerActivity(event.detail.activeUsers);
+        });
+
+        // Response saved
+        window.addEventListener('responseSaved', (event) => {
+            if (event.detail.saved) {
+                showSaveConfirmation(event.detail.mode);
+            }
+        });
+    }
+
+    // Update UI for connection mode
+    function updateUIForConnectionMode(mode) {
+        const peerActivity = document.getElementById('peerActivity');
+
+        switch(mode) {
+            case 'cloud':
+                peerActivity.style.display = 'flex';
+                break;
+            case 'local':
+                peerActivity.style.display = 'flex';
+                showLocalModeNotification();
+                break;
+            case 'offline':
+                peerActivity.style.display = 'none';
+                break;
+        }
+    }
+
+    // Update peer activity indicator
+    function updatePeerActivity(count) {
+        const peerCount = document.getElementById('peerCount');
+        peerCount.textContent = `${count} peer${count !== 1 ? 's' : ''} online`;
+    }
+
+    // Show save confirmation
+    function showSaveConfirmation(mode) {
+        const modeText = mode === 'cloud' ? '☁️ Saved to cloud' :
+                        mode === 'local' ? '🏠 Shared with class' :
+                        '💾 Saved locally';
+
+        HybridDataService.showNotification(modeText, 2000);
+    }
+
+    // Show local mode notification
+    function showLocalModeNotification() {
+        HybridDataService.showNotification('🏠 Connected to Local Hub - Sharing with classmates', 3000);
+    }
+
+    // ===============================================
+    // MAIN APP INITIALIZATION
+    // ===============================================
+
+    function initializeMainApp() {
+        console.log('Initializing main application...');
+
+        // Load the existing quiz logic from the original file
+        // This is where you would integrate your existing quiz functionality
+        // For now, let's add a simple test
+
+        const container = document.getElementById('questionsContainer');
+        container.innerHTML = `
+            <div style="padding: 20px; background: #f0f0f0; border-radius: 10px; margin-top: 20px;">
+                <h2>Welcome, ${currentUser.displayName}!</h2>
+                <p>The quiz system is now using the hybrid architecture:</p>
+                <ul>
+                    <li>✅ Firebase Authentication active</li>
+                    <li>✅ Firestore database configured</li>
+                    <li>✅ Local Hub WebSocket ready</li>
+                    <li>✅ Offline persistence enabled</li>
+                </ul>
+                <p>Connection Status: <strong id="modeDisplay">${HybridDataService.connectionMode}</strong></p>
+
+                <div style="margin-top: 20px;">
+                    <button onclick="testSaveData()" style="padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                        Test Save Response
+                    </button>
+
+                    <button onclick="testLoadData()" style="padding: 10px 20px; background: #2196F3; color: white; border: none; border-radius: 5px; cursor: pointer; margin-left: 10px;">
+                        Test Load Responses
+                    </button>
+
+                    <button onclick="HybridDataService.showLocalHubDialog()" style="padding: 10px 20px; background: #FF9800; color: white; border: none; border-radius: 5px; cursor: pointer; margin-left: 10px;">
+                        Connect to Local Hub
+                    </button>
+                </div>
+
+                <div id="testResults" style="margin-top: 20px; padding: 15px; background: white; border-radius: 5px; display: none;">
+                    <h3>Test Results:</h3>
+                    <pre id="testOutput"></pre>
+                </div>
+            </div>
+        `;
+
+        // Update mode display periodically
+        setInterval(() => {
+            const modeDisplay = document.getElementById('modeDisplay');
+            if (modeDisplay) {
+                modeDisplay.textContent = HybridDataService.connectionMode;
+            }
+        }, 1000);
+    }
+
+    // Test save functionality
+    async function testSaveData() {
+        const testQuestionId = 'test_q1';
+        const testAnswer = 'B';
+        const testReason = 'This is a test response';
+
+        const saved = await HybridDataService.saveResponse(testQuestionId, testAnswer, testReason);
+
+        const results = document.getElementById('testResults');
+        const output = document.getElementById('testOutput');
+
+        results.style.display = 'block';
+        output.textContent = `Save Test:\n` +
+                           `Mode: ${HybridDataService.connectionMode}\n` +
+                           `Question ID: ${testQuestionId}\n` +
+                           `Answer: ${testAnswer}\n` +
+                           `Reason: ${testReason}\n` +
+                           `Success: ${saved}`;
+    }
+
+    // Test load functionality
+    async function testLoadData() {
+        const testQuestionId = 'test_q1';
+        const responses = await HybridDataService.getPeerResponses(testQuestionId);
+
+        const results = document.getElementById('testResults');
+        const output = document.getElementById('testOutput');
+
+        results.style.display = 'block';
+        output.textContent = `Load Test:\n` +
+                           `Mode: ${HybridDataService.connectionMode}\n` +
+                           `Question ID: ${testQuestionId}\n` +
+                           `Responses Found: ${responses.length}\n` +
+                           `Data:\n${JSON.stringify(responses, null, 2)}`;
+    }
+
+    // Update peer visualization (placeholder)
+    function updatePeerVisualization(questionId) {
+        console.log('Updating visualization for question:', questionId);
+        // This would update charts/graphs with peer data
+    }
+
+    // Theme toggle functionality
+    document.querySelector('.theme-toggle').addEventListener('click', function() {
+        document.body.classList.toggle('dark-theme');
+        this.textContent = document.body.classList.contains('dark-theme') ? '☀️' : '🌙';
+        localStorage.setItem('theme', document.body.classList.contains('dark-theme') ? 'dark' : 'light');
+    });
+
+    // Load saved theme
+    if (localStorage.getItem('theme') === 'dark') {
+        document.body.classList.add('dark-theme');
+        document.querySelector('.theme-toggle').textContent = '☀️';
+    }
+
+    // ===============================================
+    // INTEGRATION NOTE
+    // ===============================================
+    // To fully integrate with your existing quiz system:
+    // 1. Copy the quiz logic from your original index.html
+    // 2. Replace all localStorage calls with HybridDataService methods
+    // 3. Replace username prompts with Firebase auth
+    // 4. Update data saving to use HybridDataService.saveResponse()
+    // 5. Update peer data loading to use HybridDataService.getPeerResponses()
+    // 6. Subscribe to real-time updates with HybridDataService.subscribeToQuestion()
+
+    </script>
+</body>
+</html>
